@@ -1,5 +1,5 @@
 use ChaTTY::db::{
-    self, conversations, file_transfers, messages, models::*, schema::init_db, users,
+    conversations, file_transfers, messages, models::*, schema::init_db, users,
 };
 use std::path::Path;
 use tempfile::NamedTempFile;

@@ -27,8 +27,8 @@ impl FileTransferManager {
         &self,
         path: &Path,
         peer_id: &str,
-        conversation_id: &str,
-        my_user_id: &str,
+        _conversation_id: &str,
+        _my_user_id: &str,
         database: &Database,
         pool: &ConnectionPool,
     ) -> Result<String> {

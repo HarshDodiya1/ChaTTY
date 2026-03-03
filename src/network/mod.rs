@@ -5,7 +5,8 @@ pub mod protocol;
 pub mod server;
 
 pub use client::{ConnectionPool, PeerConnection};
-pub use discovery::{DiscoveryEvent, DiscoveryService, SERVICE_TYPE};
+pub use discovery::{DiscoveryEvent, DiscoveryService};
+// Re-exported for integration tests (file_transfer_tests.rs)
 pub use file_transfer::{compute_checksum, unique_path, FileTransferManager, CHUNK_SIZE, MAX_FILE_SIZE};
 pub use protocol::NetworkMessage;
 pub use server::{NetworkEvent, TcpServer};

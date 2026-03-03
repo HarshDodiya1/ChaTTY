@@ -20,13 +20,27 @@ impl Config {
     }
 
     fn default_username() -> String {
-        // Try reading /etc/hostname, fall back to HOSTNAME env var, then "anonymous"
-        std::fs::read_to_string("/etc/hostname")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("HOSTNAME").ok())
-            .unwrap_or_else(|| "anonymous".to_string())
+        // 1. Linux: /etc/hostname
+        if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+            let h = h.trim().to_string();
+            if !h.is_empty() {
+                return h;
+            }
+        }
+        // 2. Shell env var (bash/zsh)
+        if let Ok(h) = std::env::var("HOSTNAME") {
+            if !h.is_empty() {
+                return h;
+            }
+        }
+        // 3. `hostname` command — works on macOS, BSD, and most Linux distros
+        if let Ok(out) = std::process::Command::new("hostname").output() {
+            let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !h.is_empty() {
+                return h;
+            }
+        }
+        "anonymous".to_string()
     }
 }
 

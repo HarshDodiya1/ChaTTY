@@ -3,7 +3,7 @@ use crate::db::FileTransfer;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Gauge},
     Frame,
 };
 
