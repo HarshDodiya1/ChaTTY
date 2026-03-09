@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, UdpSocket};
 use tokio::sync::mpsc;
 
 pub const SERVICE_TYPE: &str = "_chatty._tcp.local.";
@@ -44,17 +44,23 @@ impl DiscoveryService {
 
     /// Register this peer as an mDNS service so others can discover us.
     pub fn start_advertising(&self) -> Result<()> {
+        log::info!("mDNS: Advertising service '{}' on port {}", self.service_name, self.port);
         let mut props = HashMap::new();
         props.insert("user_id".to_string(), self.user_id.clone());
         props.insert("username".to_string(), self.username.clone());
         props.insert("display_name".to_string(), self.username.clone());
 
         let host = format!("{}.local.", gethostname());
+
+        // Detect primary LAN IP — "no address" (`()`) makes the daemon unable to respond
+        let my_ip = get_primary_lan_ip();
+        log::info!("mDNS: Using host='{}', ip={} for service registration", host, my_ip);
+
         let service = ServiceInfo::new(
             SERVICE_TYPE,
             &self.user_id,   // unique instance name — avoids conflicts on same username
             &host,
-            (),
+            my_ip,
             self.port,
             props,
         )
@@ -64,12 +70,14 @@ impl DiscoveryService {
             .register(service)
             .with_context(|| "Failed to register mDNS service")?;
 
+        log::info!("mDNS: Service registered successfully");
         Ok(())
     }
 
     /// Browse for peers and send events through `tx`.
     /// This spawns a blocking thread internally (mdns-sd is synchronous).
     pub fn start_browsing(&self, tx: mpsc::Sender<DiscoveryEvent>) -> Result<()> {
+        log::info!("mDNS: Starting to browse for service type: {}", SERVICE_TYPE);
         let receiver = self
             .daemon
             .browse(SERVICE_TYPE)
@@ -78,8 +86,15 @@ impl DiscoveryService {
         let own_user_id = self.user_id.clone();
 
         std::thread::spawn(move || {
+            log::info!("mDNS: Browse thread started, waiting for events...");
             while let Ok(event) = receiver.recv() {
                 match event {
+                    ServiceEvent::SearchStarted(stype) => {
+                        log::info!("mDNS: SearchStarted for {}", stype);
+                    }
+                    ServiceEvent::ServiceFound(stype, fullname) => {
+                        log::info!("mDNS: ServiceFound type={} name={}", stype, fullname);
+                    }
                     ServiceEvent::ServiceResolved(info) => {
                         let props = info.get_properties();
                         let user_id = props
@@ -104,6 +119,10 @@ impl DiscoveryService {
 
                         // Pick first resolved address
                         if let Some(&ip) = info.get_addresses().iter().next() {
+                            log::info!(
+                                "mDNS: Discovered peer '{}' (id={}) at {}:{}",
+                                username, user_id, ip, port
+                            );
                             let ev = DiscoveryEvent::PeerFound {
                                 user_id,
                                 username,
@@ -117,6 +136,7 @@ impl DiscoveryService {
                         }
                     }
                     ServiceEvent::ServiceRemoved(_ty, fullname) => {
+                        log::info!("mDNS: Service removed: {}", fullname);
                         // fullname is "<instance>.<type>" — extract user_id from it
                         // We don't have it directly, so send fullname as user_id placeholder.
                         let ev = DiscoveryEvent::PeerLost {
@@ -126,9 +146,12 @@ impl DiscoveryService {
                             break;
                         }
                     }
-                    _ => {}
+                    other => {
+                        log::debug!("mDNS: Other event: {:?}", other);
+                    }
                 }
             }
+            log::warn!("mDNS: Browse thread exiting — receiver channel closed");
         });
 
         Ok(())
@@ -167,4 +190,28 @@ fn gethostname() -> String {
         }
     }
     "localhost".to_string()
+}
+
+/// Detect the primary LAN-facing IPv4 address(es).
+///
+/// Opens a UDP socket toward an external address (no packets are sent)
+/// to determine which local interface the OS would use for LAN traffic.
+/// Falls back to 127.0.0.1 if detection fails.
+fn get_primary_lan_ip() -> IpAddr {
+    // Try to find the outbound LAN IP by "connecting" a UDP socket.
+    // This doesn't actually send anything; the OS just picks the right interface.
+    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
+        // 8.8.8.8:80 forces the OS to choose the default outbound interface.
+        if sock.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = sock.local_addr() {
+                let ip = addr.ip();
+                if !ip.is_loopback() {
+                    log::info!("Detected primary LAN IP: {}", ip);
+                    return ip;
+                }
+            }
+        }
+    }
+    log::warn!("Could not detect LAN IP, falling back to 0.0.0.0");
+    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
 }

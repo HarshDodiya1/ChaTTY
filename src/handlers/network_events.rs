@@ -9,22 +9,24 @@ pub async fn handle_network_event(
     app: &mut App,
     database: &Database,
     pool: &ConnectionPool,
-    from: Option<SocketAddr>,
+    _from: Option<SocketAddr>,
     event: NetworkEvent,
 ) {
     match event {
         NetworkEvent::MessageReceived { from: src, message } => {
+            log::debug!("Message from {}: {:?}", src, std::mem::discriminant(&message));
             handle_message(app, database, pool, src, message).await;
         }
         NetworkEvent::ConnectionEstablished { peer_addr } => {
-            log::info!("Connection established: {}", peer_addr);
+            log::info!("TCP connection established: {}", peer_addr);
         }
         NetworkEvent::ConnectionLost { peer_addr } => {
-            log::info!("Connection lost: {}", peer_addr);
+            log::info!("TCP connection lost: {}", peer_addr);
             let ip = peer_addr.ip().to_string();
             let conn = database.lock();
             for user in &mut app.users {
                 if user.ip_address.as_deref() == Some(&ip) {
+                    log::info!("Marking user '{}' ({}) as offline", user.display_name, user.id);
                     user.status = "offline".to_string();
                     let _ = db::update_user_status(
                         &conn,
@@ -36,7 +38,6 @@ pub async fn handle_network_event(
             }
         }
     }
-    let _ = from;
 }
 
 async fn handle_message(
@@ -54,6 +55,10 @@ async fn handle_message(
             port,
             ..
         } => {
+            log::info!(
+                "Received Hello from '{}' (id={}, addr={}:{})",
+                username, user_id, from.ip(), port
+            );
             let ip = from.ip().to_string();
             let conn = database.lock();
 
@@ -75,13 +80,13 @@ async fn handle_message(
             if let Some(u) = app.users.iter_mut().find(|u| u.id == user_id) {
                 u.status = "online".to_string();
                 u.display_name = display_name.clone();
-                u.ip_address = Some(ip);
+                u.ip_address = Some(ip.clone());
             } else {
                 app.users.push(db::User {
                     id: user_id.clone(),
-                    username,
-                    display_name,
-                    ip_address: Some(ip),
+                    username: username.clone(),
+                    display_name: display_name.clone(),
+                    ip_address: Some(ip.clone()),
                     port: Some(port as i64),
                     status: "online".to_string(),
                     last_seen: None,
@@ -90,7 +95,20 @@ async fn handle_message(
             }
             app.status_message = format!("{} online peers", app.online_count());
 
-            // Send HelloAck back
+            // Establish a reverse connection to the sender so we can send HelloAck
+            // and future messages. The sender's LISTENING port comes from the Hello
+            // message (not the ephemeral TCP source port).
+            let peer_listen_addr = SocketAddr::new(from.ip(), port);
+            match pool.get_or_connect(&user_id, peer_listen_addr).await {
+                Ok(_) => {
+                    log::info!("Reverse connection to {} established", peer_listen_addr);
+                }
+                Err(e) => {
+                    log::warn!("Failed to establish reverse connection to {}: {}", peer_listen_addr, e);
+                }
+            }
+
+            // Send HelloAck back through the pool (now has connection)
             let ack = NetworkMessage::HelloAck {
                 user_id: app.my_user_id.clone(),
                 username: app.my_username.clone(),
@@ -98,7 +116,10 @@ async fn handle_message(
                 port: app.port,
                 public_key: vec![],
             };
-            let _ = pool.send_to(&user_id, &ack).await;
+            match pool.send_to(&user_id, &ack).await {
+                Ok(_) => log::info!("Sent HelloAck to '{}'", username),
+                Err(e) => log::warn!("Failed to send HelloAck to '{}': {}", username, e),
+            }
 
             // Retry any undelivered messages for this peer
             retry_undelivered(app, database, pool, &user_id).await;
@@ -111,6 +132,10 @@ async fn handle_message(
             port,
             ..
         } => {
+            log::info!(
+                "Received HelloAck from '{}' (id={}, addr={}:{})",
+                username, user_id, from.ip(), port
+            );
             let ip = from.ip().to_string();
             let conn = database.lock();
             let user = db::User {
@@ -126,8 +151,16 @@ async fn handle_message(
             let _ = db::upsert_user(&conn, &user);
             drop(conn);
 
+            // Ensure we have a connection to this peer in the pool
+            let peer_listen_addr = SocketAddr::new(from.ip(), port);
+            if let Err(e) = pool.get_or_connect(&user_id, peer_listen_addr).await {
+                log::warn!("Failed to ensure connection to {} after HelloAck: {}", peer_listen_addr, e);
+            }
+
             if let Some(u) = app.users.iter_mut().find(|u| u.id == user_id) {
                 u.status = "online".to_string();
+                u.display_name = display_name.clone();
+                u.ip_address = Some(ip.clone());
             } else {
                 app.users.push(db::User {
                     id: user_id,
@@ -151,6 +184,10 @@ async fn handle_message(
             content_type,
             timestamp,
         } => {
+            log::info!(
+                "Received ChatMessage id={} from={} conv={} content_type={}",
+                id, sender_id, conversation_id, content_type
+            );
             let conn = database.lock();
 
             // Ensure conversation exists locally
@@ -159,6 +196,7 @@ async fn handle_message(
                 .flatten()
                 .is_none()
             {
+                log::info!("Creating conversation {} for incoming message", conversation_id);
                 let conv = db::Conversation {
                     id: conversation_id.clone(),
                     conv_type: "direct".to_string(),
@@ -184,14 +222,18 @@ async fn handle_message(
             drop(conn);
 
             // Send delivery receipt
-            let _ = pool
+            match pool
                 .send_to(
                     &sender_id,
                     &NetworkMessage::MessageDelivered {
                         message_id: id.clone(),
                     },
                 )
-                .await;
+                .await
+            {
+                Ok(_) => log::debug!("Sent delivery receipt for msg {}", id),
+                Err(e) => log::warn!("Failed to send delivery receipt for msg {}: {}", id, e),
+            }
 
             // Show in UI if this conversation is open
             if app.selected_conversation.as_deref() == Some(&conversation_id) {
@@ -218,6 +260,7 @@ async fn handle_message(
         }
 
         NetworkMessage::MessageDelivered { message_id } => {
+            log::debug!("Message {} marked delivered", message_id);
             let conn = database.lock();
             let _ = db::mark_message_delivered(&conn, &message_id);
             // Update in-memory message
@@ -317,14 +360,23 @@ async fn handle_message(
         }
 
         NetworkMessage::Ping => {
-            // Respond with Pong to the sender — find peer by IP
+            log::debug!("Received Ping from {}", from);
+            // Respond with Pong — find peer by IP and send through pool
             let ip = from.ip().to_string();
             if let Some(peer) = app.users.iter().find(|u| u.ip_address.as_deref() == Some(&ip)) {
-                let _ = pool.send_to(&peer.id.clone(), &NetworkMessage::Pong).await;
+                let peer_id = peer.id.clone();
+                let _ = pool.send_to(&peer_id, &NetworkMessage::Pong).await;
+            } else {
+                log::debug!("Ping from unknown peer {}, can't send Pong", from);
             }
         }
 
+        NetworkMessage::Pong => {
+            log::debug!("Received Pong from {}", from);
+        }
+
         NetworkMessage::Goodbye { user_id } => {
+            log::info!("Received Goodbye from {}", user_id);
             let conn = database.lock();
             let _ = db::update_user_status(
                 &conn,
@@ -335,9 +387,13 @@ async fn handle_message(
             if let Some(u) = app.users.iter_mut().find(|u| u.id == user_id) {
                 u.status = "offline".to_string();
             }
+            pool.remove(&user_id).await;
+            app.status_message = format!("{} online peers", app.online_count());
         }
 
-        _ => {}
+        other => {
+            log::debug!("Unhandled message type from {}: {:?}", from, std::mem::discriminant(&other));
+        }
     }
 }
 
@@ -353,6 +409,10 @@ async fn retry_undelivered(
         db::get_undelivered_messages(&conn, peer_id).unwrap_or_default()
     };
 
+    if !undelivered.is_empty() {
+        log::info!("Retrying {} undelivered messages for peer {}", undelivered.len(), peer_id);
+    }
+
     for msg in undelivered {
         if msg.sender_id == app.my_user_id {
             let net_msg = NetworkMessage::ChatMessage {
@@ -366,6 +426,7 @@ async fn retry_undelivered(
             if pool.send_to(peer_id, &net_msg).await.is_ok() {
                 let conn = database.lock();
                 let _ = db::mark_message_delivered(&conn, &msg.id);
+                log::debug!("Retried message {} successfully", msg.id);
             }
         }
     }

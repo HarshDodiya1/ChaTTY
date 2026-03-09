@@ -69,7 +69,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 
     let lines: Vec<Line> = app.messages[start..end]
         .iter()
-        .map(|msg| format_message(msg, &app.my_username))
+        .map(|msg| format_message(msg, &app.my_user_id, &app.my_username))
         .collect();
 
     let paragraph = Paragraph::new(lines)
@@ -78,9 +78,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn format_message(msg: &crate::db::models::Message, my_username: &str) -> Line<'static> {
+fn format_message(msg: &crate::db::models::Message, my_user_id: &str, _my_username: &str) -> Line<'static> {
     let time = crate::utils::helpers::format_timestamp(&msg.timestamp);
-    let is_mine = msg.sender_id == my_username || msg.content_type == "system";
+    let is_mine = msg.sender_id == my_user_id;
+    let is_system = msg.content_type == "system";
 
     let status = if msg.read {
         "✓✓"
@@ -90,7 +91,7 @@ fn format_message(msg: &crate::db::models::Message, my_username: &str) -> Line<'
         "✓"
     };
 
-    let (sender_color, content_color) = if msg.content_type == "system" {
+    let (sender_color, content_color) = if is_system {
         (Color::DarkGray, Color::DarkGray)
     } else if is_mine {
         (Color::Green, Color::White)
@@ -98,7 +99,13 @@ fn format_message(msg: &crate::db::models::Message, my_username: &str) -> Line<'
         (Color::Cyan, Color::White)
     };
 
-    let sender_display = if is_mine { "you".to_string() } else { msg.sender_id.clone() };
+    let sender_display = if is_system {
+        "system".to_string()
+    } else if is_mine {
+        "you".to_string()
+    } else {
+        msg.sender_id.clone()
+    };
 
     let mut spans = vec![
         Span::styled(

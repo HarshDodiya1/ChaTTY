@@ -7,7 +7,8 @@ pub mod users;
 
 pub use conversations::{
     add_participant, create_conversation, get_conversation_by_id,
-    get_or_create_direct_conversation,
+    get_conversations_for_user, get_or_create_direct_conversation,
+    get_participants,
 };
 pub use file_transfers::{get_pending_transfers, insert_file_transfer, update_transfer_status};
 pub use messages::{

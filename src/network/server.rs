@@ -69,6 +69,7 @@ async fn handle_connection(
     peer_addr: SocketAddr,
     tx: mpsc::Sender<NetworkEvent>,
 ) {
+    log::info!("Handling incoming connection from {}", peer_addr);
     loop {
         // Read 4-byte length prefix
         let mut len_buf = [0u8; 4];
@@ -87,6 +88,7 @@ async fn handle_connection(
 
         match NetworkMessage::deserialize(&payload) {
             Ok(message) => {
+                log::debug!("Received message from {}: {:?}", peer_addr, std::mem::discriminant(&message));
                 if tx
                     .send(NetworkEvent::MessageReceived { from: peer_addr, message })
                     .await

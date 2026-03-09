@@ -56,35 +56,49 @@ impl NetworkManager {
 
         let pool = self.pool.clone();
         let user_id = self.user_id.clone();
-        let username = self.config.username.clone();
-        let display_name = self.config.display_name.clone();
+        let my_username = self.config.username.clone();
+        let my_display_name = self.config.display_name.clone();
         let port = self.config.port;
         let net_tx = tx.clone();
 
         tokio::spawn(async move {
+            // CRITICAL: Keep the DiscoveryService alive for the lifetime of this
+            // task. Dropping it destroys the ServiceDaemon, which immediately
+            // stops mDNS advertising AND browsing.
+            let _discovery_keepalive = discovery;
+
             let heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(30));
             tokio::pin!(heartbeat_interval);
 
             loop {
                 tokio::select! {
                     Some(event) = disc_rx.recv() => {
-                        if let DiscoveryEvent::PeerFound { user_id: peer_id, ip, port: peer_port, .. } = event {
-                            let addr = SocketAddr::new(ip, peer_port);
-                            match pool.get_or_connect(&peer_id, addr).await {
-                                Ok(conn) => {
-                                    // Send Hello handshake
-                                    let hello = NetworkMessage::Hello {
-                                        user_id: user_id.clone(),
-                                        username: username.clone(),
-                                        display_name: display_name.clone(),
-                                        port,
-                                        public_key: vec![],
-                                    };
-                                    if let Err(e) = conn.send(&hello).await {
-                                        eprintln!("Handshake error: {}", e);
+                        match event {
+                            DiscoveryEvent::PeerFound { user_id: ref peer_id, ref ip, port: peer_port, ref username, .. } => {
+                                log::info!("Discovery: PeerFound '{}' (id={}) at {}:{}", username, peer_id, ip, peer_port);
+                                let addr = SocketAddr::new(*ip, peer_port);
+                                match pool.get_or_connect(peer_id, addr).await {
+                                    Ok(conn) => {
+                                        // Send Hello handshake
+                                        let hello = NetworkMessage::Hello {
+                                            user_id: user_id.clone(),
+                                            username: my_username.clone(),
+                                            display_name: my_display_name.clone(),
+                                            port,
+                                            public_key: vec![],
+                                        };
+                                        if let Err(e) = conn.send(&hello).await {
+                                            log::error!("Failed to send Hello to {}: {}", addr, e);
+                                        } else {
+                                            log::info!("Sent Hello to '{}' at {}", username, addr);
+                                        }
                                     }
+                                    Err(e) => log::error!("Failed to connect to {} ({}): {}", addr, username, e),
                                 }
-                                Err(e) => eprintln!("Connect error: {}", e),
+                            }
+                            DiscoveryEvent::PeerLost { ref user_id } => {
+                                log::info!("Discovery: PeerLost {}", user_id);
+                                pool.remove(user_id).await;
                             }
                         }
                     }
@@ -95,10 +109,10 @@ impl NetworkManager {
             }
         });
 
-        // Pong responder: watch inbound events for Ping and respond
-        let pool2 = self.pool.clone();
-        let _ = pool2; // pool2 is captured via clone below
+        // net_tx kept alive for potential future use (e.g. injecting synthetic events)
         let _ = net_tx;
+
+        log::info!("NetworkManager started: mDNS advertising + browsing, TCP server on port {}", self.config.port);
 
         Ok((handle, rx))
     }

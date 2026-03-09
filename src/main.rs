@@ -12,7 +12,7 @@ use anyhow::Result;
 use app::AppState;
 use chrono::Utc;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -31,12 +31,12 @@ const TYPING_STOP_DELAY: Duration = Duration::from_secs(3);
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
-
     // ── CLI args ──────────────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().collect();
     let mut name_override: Option<String> = None;
     let mut port_override: Option<u16> = None;
+    let mut data_dir_override: Option<String> = None;
+    let mut manual_peers: Vec<String> = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -49,11 +49,16 @@ async fn main() -> Result<()> {
                      OPTIONS:\n\
                      \t--name <username>   Override display name\n\
                      \t--port <port>       Override listen port (default: 7878)\n\
+                     \t--data-dir <path>   Override data directory (default: ~/.ChaTTY/)\n\
+                     \t--peer <host:port>  Connect to a peer directly (repeatable)\n\
                      \t--help, -h          Show this help\n\n\
                      DATA:\n\
                      \tConfig:  ~/.ChaTTY/config.toml\n\
                      \tDB:      ~/.ChaTTY/chatapp.db\n\
-                     \tLogs:    RUST_LOG=debug ChaTTY",
+                     \tLogs:    ~/.ChaTTY/chatty.log\n\n\
+                     EXAMPLES:\n\
+                     \tChaTTY --name alice\n\
+                     \tChaTTY --name bob --port 7879 --peer 192.168.1.10:7878",
                     env!("CARGO_PKG_VERSION")
                 );
                 return Ok(());
@@ -73,13 +78,30 @@ async fn main() -> Result<()> {
                     );
                 }
             }
+            "--data-dir" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    data_dir_override = Some(val.clone());
+                }
+            }
+            "--peer" => {
+                i += 1;
+                if let Some(val) = args.get(i) {
+                    manual_peers.push(val.clone());
+                }
+            }
             _ => {}
         }
         i += 1;
     }
 
     // ── Config ────────────────────────────────────────────────────────────
-    let mut config = config::load_or_create()?;
+    let mut config = if let Some(ref dir) = data_dir_override {
+        let data_dir = std::path::PathBuf::from(dir);
+        config::load_or_create_in(&data_dir)?
+    } else {
+        config::load_or_create()?
+    };
     if let Some(name) = name_override {
         config.username = name.clone();
         config.display_name = name;
@@ -90,13 +112,45 @@ async fn main() -> Result<()> {
         config::save(&config)?;
     }
 
+    // ── File-based logging ────────────────────────────────────────────────
+    // Logs go to ~/.ChaTTY/chatty.log (not stdout, which is used by the TUI)
+    {
+        use std::io::Write;
+        std::fs::create_dir_all(&config.data_dir)?;
+        let log_path = config.data_dir.join("chatty.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        env_logger::Builder::from_env(
+            env_logger::Env::default().default_filter_or("info")
+        )
+        .target(env_logger::Target::Pipe(Box::new(log_file)))
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "[{} {:5} {}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.module_path().unwrap_or(""),
+                record.args()
+            )
+        })
+        .init();
+    }
+    log::info!("=== ChaTTY starting ===");
+    log::info!("Config: {:?}", config);
+    log::info!("Data dir: {}", config.data_dir.display());
+
     // ── Database ──────────────────────────────────────────────────────────
+    log::info!("Opening database at {}", config.db_path.display());
     let database = Arc::new(Database::open(&config.db_path)?);
     let user_id = {
         let conn = database.lock();
         if let Some(existing) = db::get_user_by_username(&conn, &config.username)? {
             // Update status to online
             let _ = db::update_user_status(&conn, &existing.id, "online", &Utc::now().to_rfc3339());
+            log::info!("Existing user '{}' id={}", config.username, existing.id);
             existing.id
         } else {
             let id = Uuid::new_v4().to_string();
@@ -113,13 +167,12 @@ async fn main() -> Result<()> {
                     public_key: None,
                 },
             )?;
+            log::info!("Created new user '{}' id={}", config.username, id);
             id
         }
     };
 
-    // First-run detection: config.toml existed before this session?
-    let is_first_run = !config.db_path.with_file_name("config.toml").exists()
-        || std::env::var("CHATTY_FIRST_RUN").is_ok();
+    let is_first_run = std::env::var("CHATTY_FIRST_RUN").is_ok();
 
     // ── App state ─────────────────────────────────────────────────────────
     let mut app_state = app::App::new(
@@ -130,9 +183,56 @@ async fn main() -> Result<()> {
     app_state.first_run = is_first_run;
 
     // ── Network ───────────────────────────────────────────────────────────
+    log::info!("Starting network: port={}, user_id={}", config.port, user_id);
     let net_manager = network::NetworkManager::new(&config, user_id.clone());
     let pool = net_manager.pool.clone();
     let (_server_handle, mut net_rx) = net_manager.start()?;
+    log::info!("Network started, TCP server listening on 0.0.0.0:{}", config.port);
+
+    // ── Manual peer connections (--peer flag) ─────────────────────────────
+    if !manual_peers.is_empty() {
+        log::info!("Connecting to {} manual peer(s)...", manual_peers.len());
+        let pool_clone = pool.clone();
+        let user_id_clone = user_id.clone();
+        let username_clone = config.username.clone();
+        let display_name_clone = config.display_name.clone();
+        let my_port = config.port;
+        tokio::spawn(async move {
+            // Small delay to let the TCP server fully start
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            for peer_addr_str in &manual_peers {
+                match peer_addr_str.parse::<std::net::SocketAddr>() {
+                    Ok(addr) => {
+                        log::info!("Manual peer: connecting to {}", addr);
+                        // Use a placeholder peer_id until we get their Hello back
+                        let temp_peer_id = format!("manual-{}", addr);
+                        match pool_clone.get_or_connect(&temp_peer_id, addr).await {
+                            Ok(conn) => {
+                                let hello = network::NetworkMessage::Hello {
+                                    user_id: user_id_clone.clone(),
+                                    username: username_clone.clone(),
+                                    display_name: display_name_clone.clone(),
+                                    port: my_port,
+                                    public_key: vec![],
+                                };
+                                if let Err(e) = conn.send(&hello).await {
+                                    log::error!("Failed to send Hello to manual peer {}: {}", addr, e);
+                                } else {
+                                    log::info!("Sent Hello to manual peer {}", addr);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Failed to connect to manual peer {}: {}", addr, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Invalid --peer address '{}': {} (expected host:port, e.g. 192.168.1.10:7878)", peer_addr_str, e);
+                    }
+                }
+            }
+        });
+    }
 
     // ── Terminal setup ────────────────────────────────────────────────────
     enable_raw_mode()?;
@@ -172,6 +272,11 @@ async fn main() -> Result<()> {
         tokio::select! {
             Some(ev) = term_rx.recv() => {
                 if let Event::Key(key) = ev {
+                    // Only process key Press events (not Release/Repeat)
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
                     // Typing indicator: any char key in Chat state
                     if app_state.state == AppState::Chat
                         && matches!(key.code, KeyCode::Char(_))
@@ -201,6 +306,20 @@ async fn main() -> Result<()> {
                         let raw = app_state.input_buffer.clone();
                         app_state.input_buffer.clear();
                         app_state.input_cursor = 0;
+
+                        // Send typing stopped indicator to peer when message is sent
+                        if typing_sent {
+                            if let Some(peer) = app_state.users.get(app_state.selected_user_index) {
+                                let peer_id = peer.id.clone();
+                                let conv_id = app_state.selected_conversation.clone().unwrap_or_default();
+                                let msg = network::NetworkMessage::TypingIndicator {
+                                    user_id: app_state.my_user_id.clone(),
+                                    conversation_id: conv_id,
+                                    is_typing: false,
+                                };
+                                pool.send_to(&peer_id, &msg).await.ok();
+                            }
+                        }
                         typing_sent = false;
                         last_typed_at = None;
 
@@ -276,6 +395,7 @@ async fn main() -> Result<()> {
     }
 
     // ── Shutdown ──────────────────────────────────────────────────────────
+    log::info!("Shutting down...");
     // Mark self offline
     {
         let conn = database.lock();
@@ -339,16 +459,17 @@ fn load_conversation(
         None => return Ok(()),
     };
 
+    log::info!("Loading conversation with '{}' (id={})", peer.display_name, peer.id);
     let conn = database.lock();
     let conv = db::get_or_create_direct_conversation(&conn, my_user_id, &peer.id)?;
     app.selected_conversation = Some(conv.id.clone());
 
     let msgs = db::get_messages_for_conversation(&conn, &conv.id, 50, 0)?;
+    log::info!("Loaded {} messages for conversation {}", msgs.len(), conv.id);
     app.messages = msgs;
     app.scroll_offset = 0;
     app.unread_counts.remove(&peer.id);
 
-    // Send MessageRead to peer
     drop(conn);
 
     Ok(())
@@ -400,7 +521,10 @@ async fn send_message(
     };
 
     // Best-effort send; if peer is offline, message stays in DB for retry
-    pool.send_to(&peer.id, &net_msg).await.ok();
+    match pool.send_to(&peer.id, &net_msg).await {
+        Ok(_) => log::info!("Sent message to '{}' (id={})", peer.display_name, peer.id),
+        Err(e) => log::warn!("Failed to send message to '{}': {} (saved in DB for retry)", peer.display_name, e),
+    }
 
     Ok(())
 }

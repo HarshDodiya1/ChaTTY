@@ -21,6 +21,7 @@ pub struct PeerConnection {
 impl PeerConnection {
     /// Connect to `addr` with a 5-second timeout.
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
+        log::debug!("Connecting to {}...", addr);
         let stream = timeout(Duration::from_secs(5), TcpStream::connect(addr))
             .await
             .with_context(|| format!("Connection to {} timed out", addr))?
@@ -106,6 +107,11 @@ impl ConnectionPool {
         let conn = self.conns.lock().await.get(peer_id).cloned();
         if let Some(conn) = conn {
             conn.send(message).await?;
+        } else {
+            log::warn!(
+                "send_to: no connection for peer '{}' — message dropped",
+                peer_id
+            );
         }
         Ok(())
     }

@@ -80,8 +80,38 @@ pub fn load_or_create() -> Result<Config> {
     }
 }
 
+/// Load config from a custom data directory (for multi-instance testing).
+pub fn load_or_create_in(data_dir: &std::path::Path) -> Result<Config> {
+    let path = data_dir.join("config.toml");
+
+    if path.exists() {
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+        let mut config: Config = toml::from_str(&contents)
+            .with_context(|| "Failed to parse config.toml")?;
+        // Override paths to use the custom data dir
+        config.data_dir = data_dir.to_path_buf();
+        config.db_path = data_dir.join("chatapp.db");
+        Ok(config)
+    } else {
+        let mut config = Config::default();
+        config.data_dir = data_dir.to_path_buf();
+        config.db_path = data_dir.join("chatapp.db");
+        // Save to the custom location
+        fs::create_dir_all(data_dir)
+            .with_context(|| format!("Failed to create data directory: {}", data_dir.display()))?;
+        let contents = toml::to_string_pretty(&config)
+            .with_context(|| "Failed to serialize config")?;
+        fs::write(&path, contents)
+            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
+        Ok(config)
+    }
+}
+
 pub fn save(config: &Config) -> Result<()> {
-    let path = config_path();
+    // Write to the config's OWN data_dir, not the hardcoded default.
+    // This is important when using --data-dir for multi-instance testing.
+    let path = config.data_dir.join("config.toml");
 
     // Ensure the data directory exists
     fs::create_dir_all(&config.data_dir)
