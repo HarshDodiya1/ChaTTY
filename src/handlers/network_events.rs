@@ -99,6 +99,11 @@ async fn handle_message(
             // and future messages. The sender's LISTENING port comes from the Hello
             // message (not the ephemeral TCP source port).
             let peer_listen_addr = SocketAddr::new(from.ip(), port);
+            
+            // Remove any stale connection for this peer before reconnecting.
+            // This handles the case where a peer restarts and sends a new Hello.
+            pool.remove(&user_id).await;
+            
             match pool.get_or_connect(&user_id, peer_listen_addr).await {
                 Ok(_) => {
                     log::info!("Reverse connection to {} established", peer_listen_addr);

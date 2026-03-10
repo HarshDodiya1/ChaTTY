@@ -189,45 +189,111 @@ async fn main() -> Result<()> {
     let (_server_handle, mut net_rx) = net_manager.start()?;
     log::info!("Network started, TCP server listening on 0.0.0.0:{}", config.port);
 
-    // ── Manual peer connections (--peer flag) ─────────────────────────────
-    if !manual_peers.is_empty() {
-        log::info!("Connecting to {} manual peer(s)...", manual_peers.len());
+    // ── Auto-reconnect to known peers + manual peer connections ────────────
+    {
         let pool_clone = pool.clone();
         let user_id_clone = user_id.clone();
         let username_clone = config.username.clone();
         let display_name_clone = config.display_name.clone();
         let my_port = config.port;
+        let database_clone = database.clone();
+        
         tokio::spawn(async move {
             // Small delay to let the TCP server fully start
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            
+            // Helper to send Hello to a peer
+            let send_hello = |pool: &network::ConnectionPool, peer_id: String, addr: std::net::SocketAddr, user_id: String, username: String, display_name: String, port: u16| {
+                let pool = pool.clone();
+                async move {
+                    match pool.get_or_connect(&peer_id, addr).await {
+                        Ok(conn) => {
+                            let hello = network::NetworkMessage::Hello {
+                                user_id,
+                                username,
+                                display_name,
+                                port,
+                                public_key: vec![],
+                            };
+                            if let Err(e) = conn.send(&hello).await {
+                                log::error!("Failed to send Hello to {}: {}", addr, e);
+                            } else {
+                                log::info!("Sent Hello to {}", addr);
+                            }
+                        }
+                        Err(e) => {
+                            log::debug!("Failed to connect to {}: {}", addr, e);
+                        }
+                    }
+                }
+            };
+
+            // 1. Connect to manual peers from --peer flag
+            if !manual_peers.is_empty() {
+                log::info!("Connecting to {} manual peer(s)...", manual_peers.len());
+            }
             for peer_addr_str in &manual_peers {
                 match peer_addr_str.parse::<std::net::SocketAddr>() {
                     Ok(addr) => {
                         log::info!("Manual peer: connecting to {}", addr);
-                        // Use a placeholder peer_id until we get their Hello back
                         let temp_peer_id = format!("manual-{}", addr);
-                        match pool_clone.get_or_connect(&temp_peer_id, addr).await {
-                            Ok(conn) => {
-                                let hello = network::NetworkMessage::Hello {
-                                    user_id: user_id_clone.clone(),
-                                    username: username_clone.clone(),
-                                    display_name: display_name_clone.clone(),
-                                    port: my_port,
-                                    public_key: vec![],
-                                };
-                                if let Err(e) = conn.send(&hello).await {
-                                    log::error!("Failed to send Hello to manual peer {}: {}", addr, e);
-                                } else {
-                                    log::info!("Sent Hello to manual peer {}", addr);
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("Failed to connect to manual peer {}: {}", addr, e);
-                            }
-                        }
+                        send_hello(
+                            &pool_clone,
+                            temp_peer_id,
+                            addr,
+                            user_id_clone.clone(),
+                            username_clone.clone(),
+                            display_name_clone.clone(),
+                            my_port,
+                        ).await;
                     }
                     Err(e) => {
-                        log::error!("Invalid --peer address '{}': {} (expected host:port, e.g. 192.168.1.10:7878)", peer_addr_str, e);
+                        log::error!("Invalid --peer address '{}': {}", peer_addr_str, e);
+                    }
+                }
+            }
+
+            // 2. Auto-reconnect to known peers from database
+            let known_peers: Vec<db::User> = {
+                let conn = database_clone.lock();
+                db::get_all_users(&conn).unwrap_or_default()
+            };
+            
+            let reconnect_count = known_peers.iter()
+                .filter(|u| u.id != user_id_clone && u.ip_address.is_some() && u.port.is_some())
+                .count();
+            
+            if reconnect_count > 0 {
+                log::info!("Auto-reconnecting to {} known peer(s) from database...", reconnect_count);
+            }
+            
+            for peer in known_peers {
+                // Skip self
+                if peer.id == user_id_clone {
+                    continue;
+                }
+                // Skip peers without connection info
+                let (Some(ip), Some(port)) = (&peer.ip_address, peer.port) else {
+                    continue;
+                };
+                
+                // Parse address
+                let addr_str = format!("{}:{}", ip, port);
+                match addr_str.parse::<std::net::SocketAddr>() {
+                    Ok(addr) => {
+                        log::info!("Auto-reconnect: trying {} ({})", peer.display_name, addr);
+                        send_hello(
+                            &pool_clone,
+                            peer.id.clone(),
+                            addr,
+                            user_id_clone.clone(),
+                            username_clone.clone(),
+                            display_name_clone.clone(),
+                            my_port,
+                        ).await;
+                    }
+                    Err(e) => {
+                        log::debug!("Invalid address for peer {}: {}", peer.display_name, e);
                     }
                 }
             }
