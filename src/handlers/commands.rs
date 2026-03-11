@@ -17,16 +17,32 @@ pub fn handle_command(app: &mut App, input: &str) -> bool {
         }
         "help" => {
             app.show_popup(
-                "Available Commands",
-                "/help  /quit  /clear\n\
-                 /nick <name>  /status <online|away>\n\
-                 /group create <name> <user…>\n\
-                 /group invite <user>\n\
-                 /group leave\n\
-                 /group list\n\
-                 /file <path>  /files\n\
-                 /search <query>  /export\n\
-                 /info",
+                "⌨  ChaTTY Commands",
+                "
+ ━━━ General ━━━━━━━━━━━━━━━━━━━━━━━━━
+  /help          Show this help
+  /info          Your connection info
+  /clear         Clear chat view
+  /quit          Exit ChaTTY
+
+ ━━━ Identity ━━━━━━━━━━━━━━━━━━━━━━━━
+  /nick <name>   Change display name
+  /status <s>    Set online/away
+
+ ━━━ Groups ━━━━━━━━━━━━━━━━━━━━━━━━━━
+  /group create <name>   New group
+  /group invite <user>   Add member
+  /group leave           Leave group
+  /group list            Show groups
+
+ ━━━ Files ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  /file <path>   Send a file
+  /files         Show transfers
+
+ ━━━ Chat ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  /search <q>    Search messages
+  /export        Export chat to file
+",
                 None,
             );
         }

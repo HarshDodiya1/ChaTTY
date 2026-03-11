@@ -1,0 +1,26 @@
+# Build artifacts — never needed in the image
+target/
+
+# Git history
+.git/
+.gitignore
+
+# Documentation — not needed at runtime
+*.md
+docs/
+
+# Local config and data — should come from mounted volumes
+.ChaTTY*/
+*.toml.bak
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+warnings.md
+WORK.md
