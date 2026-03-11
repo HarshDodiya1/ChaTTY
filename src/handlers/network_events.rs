@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::db::{self, Database};
 use crate::network::{ConnectionPool, NetworkEvent, NetworkMessage};
+use crate::utils::notifications;
 use chrono::Utc;
 use std::net::SocketAddr;
 
@@ -78,9 +79,14 @@ async fn handle_message(
 
             // Update app user list
             if let Some(u) = app.users.iter_mut().find(|u| u.id == user_id) {
+                // User was offline, now coming back online
+                let was_offline = u.status == "offline";
                 u.status = "online".to_string();
                 u.display_name = display_name.clone();
                 u.ip_address = Some(ip.clone());
+                if was_offline {
+                    notifications::notify_user_online(&display_name);
+                }
             } else {
                 app.users.push(db::User {
                     id: user_id.clone(),
@@ -92,6 +98,8 @@ async fn handle_message(
                     last_seen: None,
                     public_key: None,
                 });
+                // Notify for new user discovery
+                notifications::notify_user_online(&display_name);
             }
             app.status_message = format!("{} online peers", app.online_count());
 
@@ -246,6 +254,17 @@ async fn handle_message(
                 .map(|u| u.id == sender_id)
                 .unwrap_or(false);
 
+            // Get sender name for notification
+            let sender_name = app
+                .users
+                .iter()
+                .find(|u| u.id == sender_id)
+                .map(|u| u.display_name.clone())
+                .unwrap_or(sender_id.clone());
+
+            // Always send desktop notification for incoming messages
+            notifications::notify_new_message(&sender_name, &content);
+
             // Show in UI if we're chatting with this sender (regardless of conversation_id mismatch)
             if currently_chatting_with_sender || app.selected_conversation.as_deref() == Some(&conversation_id) {
                 // Update selected_conversation to match sender's convention for consistency
@@ -264,13 +283,7 @@ async fn handle_message(
                 });
             } else {
                 *app.unread_counts.entry(sender_id.clone()).or_insert(0) += 1;
-                let name = app
-                    .users
-                    .iter()
-                    .find(|u| u.id == sender_id)
-                    .map(|u| u.display_name.clone())
-                    .unwrap_or(sender_id);
-                app.show_popup("New Message", &format!("Message from {}", name), Some(3.0));
+                app.show_popup("New Message", &format!("Message from {}", sender_name), Some(3.0));
             }
         }
 
@@ -439,12 +452,14 @@ async fn handle_message(
                 file_size,
                 bytes_transferred: 0,
                 is_upload: false,
-                peer_name: sender_name,
+                peer_name: sender_name.clone(),
                 status: crate::app::TransferStatus::InProgress,
                 started_at: std::time::Instant::now(),
             });
             
             app.show_popup("Incoming File", &format!("Receiving: {} ({:.2} MB)", filename, file_size as f64 / 1024.0 / 1024.0), Some(3.0));
+            // Send desktop notification for incoming file
+            notifications::notify_file_offer(&sender_name, &filename);
         }
 
         NetworkMessage::FileAccept { transfer_id } => {
@@ -499,8 +514,10 @@ async fn handle_message(
             };
             
             // Show popup after mutable borrow is released
-            if let Some(fname) = completed_filename {
+            if let Some(ref fname) = completed_filename {
                 app.show_popup("File Complete", &format!("Downloaded: {}", fname), Some(3.0));
+                // Send desktop notification for completed file transfer
+                notifications::notify_file_complete(fname);
             }
             
             // Save chunk to file
