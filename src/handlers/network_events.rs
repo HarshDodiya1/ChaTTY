@@ -240,8 +240,18 @@ async fn handle_message(
                 Err(e) => log::warn!("Failed to send delivery receipt for msg {}: {}", id, e),
             }
 
-            // Show in UI if this conversation is open
-            if app.selected_conversation.as_deref() == Some(&conversation_id) {
+            // Check if we're currently chatting with this sender
+            let currently_chatting_with_sender = app.users
+                .get(app.selected_user_index)
+                .map(|u| u.id == sender_id)
+                .unwrap_or(false);
+
+            // Show in UI if we're chatting with this sender (regardless of conversation_id mismatch)
+            if currently_chatting_with_sender || app.selected_conversation.as_deref() == Some(&conversation_id) {
+                // Update selected_conversation to match sender's convention for consistency
+                if app.selected_conversation.as_deref() != Some(&conversation_id) {
+                    app.selected_conversation = Some(conversation_id.clone());
+                }
                 app.messages.push(db::Message {
                     id,
                     conversation_id,
@@ -394,6 +404,148 @@ async fn handle_message(
             }
             pool.remove(&user_id).await;
             app.status_message = format!("{} online peers", app.online_count());
+        }
+
+        NetworkMessage::FileOffer {
+            transfer_id,
+            message_id: _,
+            filename,
+            file_size,
+            checksum,
+        } => {
+            log::info!("Received FileOffer: {} ({} bytes)", filename, file_size);
+            let ip = from.ip().to_string();
+            let (sender_id, sender_name) = app.users.iter()
+                .find(|u| u.ip_address.as_deref() == Some(&ip))
+                .map(|u| (u.id.clone(), u.display_name.clone()))
+                .unwrap_or_else(|| ("unknown".to_string(), "Unknown".to_string()));
+            
+            // Store the offer for potential acceptance
+            app.pending_file_offers.insert(
+                transfer_id.clone(),
+                (filename.clone(), file_size, checksum, sender_id.clone(), sender_name.clone())
+            );
+            
+            // Auto-accept for now (in a real app, you'd prompt the user)
+            let accept = NetworkMessage::FileAccept {
+                transfer_id: transfer_id.clone(),
+            };
+            let _ = pool.send_to(&sender_id, &accept).await;
+            
+            // Add to active transfers (receiving)
+            app.active_transfers.push(crate::app::ActiveTransfer {
+                id: transfer_id.clone(),
+                filename: filename.clone(),
+                file_size,
+                bytes_transferred: 0,
+                is_upload: false,
+                peer_name: sender_name,
+                status: crate::app::TransferStatus::InProgress,
+                started_at: std::time::Instant::now(),
+            });
+            
+            app.show_popup("Incoming File", &format!("Receiving: {} ({:.2} MB)", filename, file_size as f64 / 1024.0 / 1024.0), Some(3.0));
+        }
+
+        NetworkMessage::FileAccept { transfer_id } => {
+            log::info!("FileAccept received for transfer {}", transfer_id);
+            // Mark transfer as in progress
+            if let Some(t) = app.active_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                t.status = crate::app::TransferStatus::InProgress;
+            }
+            // Find peer_id from the socket address
+            let ip = from.ip().to_string();
+            if let Some(peer) = app.users.iter().find(|u| u.ip_address.as_deref() == Some(&ip)) {
+                let peer_id = peer.id.clone();
+                // Queue this transfer for chunk sending
+                app.pending_chunk_sends.push((transfer_id.clone(), peer_id));
+                log::info!("Queued transfer {} for chunk sending", transfer_id);
+            } else {
+                log::warn!("FileAccept from unknown peer {}", from);
+            }
+            app.show_popup("File Transfer", "Peer accepted file, sending...", Some(2.0));
+        }
+
+        NetworkMessage::FileReject { transfer_id } => {
+            log::info!("FileReject received for transfer {}", transfer_id);
+            if let Some(t) = app.active_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                t.status = crate::app::TransferStatus::Failed("Peer rejected transfer".to_string());
+            }
+            app.pending_file_offers.remove(&transfer_id);
+            app.show_popup("File Rejected", "Peer declined the file transfer", Some(3.0));
+        }
+
+        NetworkMessage::FileChunk {
+            transfer_id,
+            chunk_index,
+            data,
+            is_last,
+        } => {
+            log::debug!("Received FileChunk {} for transfer {} ({} bytes, last={})", 
+                       chunk_index, transfer_id, data.len(), is_last);
+            
+            // Update progress in active transfers and collect info for popup
+            let completed_filename = {
+                let mut filename = None;
+                if let Some(t) = app.active_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                    t.bytes_transferred += data.len() as u64;
+                    
+                    if is_last {
+                        t.status = crate::app::TransferStatus::Complete;
+                        filename = Some(t.filename.clone());
+                    }
+                }
+                filename
+            };
+            
+            // Show popup after mutable borrow is released
+            if let Some(fname) = completed_filename {
+                app.show_popup("File Complete", &format!("Downloaded: {}", fname), Some(3.0));
+            }
+            
+            // Save chunk to file
+            let (checksum, filename) = app.pending_file_offers.get(&transfer_id)
+                .map(|(f, _, c, _, _)| (c.clone(), f.clone()))
+                .unwrap_or_else(|| ("".to_string(), "unknown".to_string()));
+            
+            // Write chunk to downloads directory (use app.data_dir)
+            let downloads_dir = app.data_dir.join("downloads");
+            
+            if let Err(e) = std::fs::create_dir_all(&downloads_dir) {
+                log::error!("Failed to create downloads dir: {}", e);
+            }
+            
+            let part_path = downloads_dir.join(format!("{}.part", transfer_id));
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&part_path) 
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(e) = file.write_all(&data) {
+                        log::error!("Failed to write chunk: {}", e);
+                    }
+                }
+                Err(e) => log::error!("Failed to open part file: {}", e),
+            }
+            
+            if is_last {
+                // Move to final location with original filename
+                let final_path = downloads_dir.join(&filename);
+                if let Err(e) = std::fs::rename(&part_path, &final_path) {
+                    log::error!("Failed to rename completed file: {}", e);
+                } else {
+                    log::info!("File transfer complete: {}", final_path.display());
+                }
+                
+                // Verify checksum if we have one
+                if !checksum.is_empty() {
+                    // Checksum verification could be done here
+                }
+                
+                app.pending_file_offers.remove(&transfer_id);
+            }
         }
 
         other => {

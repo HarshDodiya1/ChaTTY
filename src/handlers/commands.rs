@@ -4,9 +4,9 @@ use crate::app::App;
 /// Returns true if the input was a valid command (even if unknown).
 pub fn handle_command(app: &mut App, input: &str) -> bool {
     let trimmed = input.trim_start_matches('/');
-    let mut parts = trimmed.splitn(3, ' ');
+    let mut parts = trimmed.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
-    let rest = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("");  // Everything after the command
 
     match cmd {
         "quit" | "q" => {
@@ -46,16 +46,57 @@ pub fn handle_command(app: &mut App, input: &str) -> bool {
                 app.show_popup("Error", "Usage: /status <online|away>", Some(3.0));
             }
         },
-        "group" => handle_group_command(app, rest, parts.next().unwrap_or("")),
+        "group" => {
+            // Parse: /group <subcommand> [args...]
+            let mut group_parts = rest.splitn(2, ' ');
+            let sub = group_parts.next().unwrap_or("");
+            let args = group_parts.next().unwrap_or("");
+            handle_group_command(app, sub, args);
+        }
         "file" => {
             if rest.is_empty() {
                 app.show_popup("Error", "Usage: /file <path>", Some(3.0));
             } else {
-                app.show_popup("File Transfer", "File transfer — implemented in Section 9.", Some(3.0));
+                // Expand ~ to home directory
+                let path = if rest.starts_with("~/") {
+                    if let Some(home) = dirs::home_dir() {
+                        home.join(&rest[2..]).to_string_lossy().to_string()
+                    } else {
+                        rest.to_string()
+                    }
+                } else {
+                    rest.to_string()
+                };
+                
+                // Check if file exists
+                if std::path::Path::new(&path).exists() {
+                    app.pending_file_send = Some(path.clone());
+                    app.show_popup("File Transfer", &format!("Sending: {}", path), Some(2.0));
+                } else {
+                    app.show_popup("Error", &format!("File not found: {}", path), Some(3.0));
+                }
             }
         }
         "files" => {
-            app.show_popup("File Transfers", "File transfer list — implemented in Section 9.", Some(3.0));
+            if app.active_transfers.is_empty() {
+                app.show_popup("File Transfers", "No active transfers", Some(3.0));
+            } else {
+                let mut info = String::new();
+                for t in &app.active_transfers {
+                    let status = match &t.status {
+                        crate::app::TransferStatus::Pending => "⏳ Pending",
+                        crate::app::TransferStatus::InProgress => "📤 In Progress",
+                        crate::app::TransferStatus::Complete => "✅ Complete",
+                        crate::app::TransferStatus::Failed(e) => &format!("❌ Failed: {}", e),
+                    };
+                    let direction = if t.is_upload { "↑" } else { "↓" };
+                    info.push_str(&format!(
+                        "{} {} {} - {:.1}% ({:.2} MB/s)\\n",
+                        direction, t.filename, status, t.progress_percent(), t.speed_mbps()
+                    ));
+                }
+                app.show_popup("File Transfers", &info, None);
+            }
         }
         "search" => {
             if rest.is_empty() {

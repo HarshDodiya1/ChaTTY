@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
         config.display_name.clone(),
         user_id.clone(),
         config.port,
+        config.data_dir.clone(),
     );
     app_state.first_run = is_first_run;
 
@@ -188,6 +189,10 @@ async fn main() -> Result<()> {
     let pool = net_manager.pool.clone();
     let (_server_handle, mut net_rx) = net_manager.start()?;
     log::info!("Network started, TCP server listening on 0.0.0.0:{}", config.port);
+
+    // ── File Transfer Manager ─────────────────────────────────────────────
+    let file_manager = Arc::new(network::file_transfer::FileTransferManager::new(&config.data_dir));
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<app::TransferProgress>();
 
     // ── Auto-reconnect to known peers + manual peer connections ────────────
     {
@@ -336,6 +341,63 @@ async fn main() -> Result<()> {
             .unwrap_or(Duration::ZERO);
 
         tokio::select! {
+            biased;
+            
+            // Network events have highest priority
+            Some(event) = net_rx.recv() => {
+                let from = match &event {
+                    network::NetworkEvent::MessageReceived { from, .. } => Some(*from),
+                    network::NetworkEvent::ConnectionEstablished { peer_addr } => Some(*peer_addr),
+                    network::NetworkEvent::ConnectionLost { peer_addr } => Some(*peer_addr),
+                };
+                handlers::network_events::handle_network_event(
+                    &mut app_state, &database, &pool, from, event
+                ).await;
+                
+                // Process any pending chunk sends (triggered by FileAccept)
+                let chunks_to_send: Vec<_> = app_state.pending_chunk_sends.drain(..).collect();
+                for (transfer_id, peer_id) in chunks_to_send {
+                    log::info!("Starting chunk transmission for transfer {}", transfer_id);
+                    let fm = file_manager.clone();
+                    let db = database.clone();
+                    let p = pool.clone();
+                    let tid = transfer_id.clone();
+                    let ptx = progress_tx.clone();
+                    
+                    // Spawn a task to send chunks
+                    tokio::spawn(async move {
+                        match fm.start_sending(&tid, &peer_id, &db, &p, ptx).await {
+                            Ok(()) => log::info!("Transfer {} completed successfully", tid),
+                            Err(e) => log::error!("Transfer {} failed: {}", tid, e),
+                        }
+                    });
+                }
+            }
+            
+            // Handle file transfer progress updates
+            Some(progress) = progress_rx.recv() => {
+                match progress {
+                    app::TransferProgress::BytesSent { transfer_id, bytes } => {
+                        if let Some(t) = app_state.active_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                            t.bytes_transferred = bytes;
+                            t.status = app::TransferStatus::InProgress;
+                        }
+                    }
+                    app::TransferProgress::Completed { transfer_id } => {
+                        if let Some(t) = app_state.active_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                            t.status = app::TransferStatus::Complete;
+                        }
+                        app_state.show_popup("File Sent", "File transfer completed!", Some(3.0));
+                    }
+                    app::TransferProgress::Failed { transfer_id, error } => {
+                        if let Some(t) = app_state.active_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                            t.status = app::TransferStatus::Failed(error.clone());
+                        }
+                        app_state.show_popup("Transfer Failed", &error, Some(5.0));
+                    }
+                }
+            }
+            
             Some(ev) = term_rx.recv() => {
                 if let Event::Key(key) = ev {
                     // Only process key Press events (not Release/Repeat)
@@ -395,6 +457,50 @@ async fn main() -> Result<()> {
                             if let Some(query) = app_state.search_query.clone() {
                                 run_search(&mut app_state, &database, &query);
                             }
+                            // Handle file send command
+                            if let Some(file_path) = app_state.pending_file_send.take() {
+                                if let Some(peer) = app_state.users.get(app_state.selected_user_index) {
+                                    let peer_id = peer.id.clone();
+                                    let peer_name = peer.display_name.clone();
+                                    let conv_id = app_state.selected_conversation.clone().unwrap_or_default();
+                                    
+                                    match file_manager.send_file(
+                                        std::path::Path::new(&file_path),
+                                        &peer_id,
+                                        &conv_id,
+                                        &app_state.my_user_id,
+                                        &database,
+                                        &pool,
+                                    ).await {
+                                        Ok(transfer_id) => {
+                                            let file_size = std::fs::metadata(&file_path)
+                                                .map(|m| m.len())
+                                                .unwrap_or(0);
+                                            let filename = std::path::Path::new(&file_path)
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("file")
+                                                .to_string();
+                                            app_state.active_transfers.push(app::ActiveTransfer {
+                                                id: transfer_id,
+                                                filename,
+                                                file_size,
+                                                bytes_transferred: 0,
+                                                is_upload: true,
+                                                peer_name,
+                                                status: app::TransferStatus::Pending,
+                                                started_at: Instant::now(),
+                                            });
+                                            app_state.show_popup("File Transfer", "File offer sent, waiting for acceptance...", Some(3.0));
+                                        }
+                                        Err(e) => {
+                                            app_state.show_popup("Error", &format!("Failed to send file: {}", e), Some(5.0));
+                                        }
+                                    }
+                                } else {
+                                    app_state.show_popup("Error", "No peer selected to send file to", Some(3.0));
+                                }
+                            }
                         } else {
                             send_message(&mut app_state, &database, &pool, raw).await?;
                         }
@@ -408,17 +514,6 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-            }
-
-            Some(event) = net_rx.recv() => {
-                let from = match &event {
-                    network::NetworkEvent::MessageReceived { from, .. } => Some(*from),
-                    network::NetworkEvent::ConnectionEstablished { peer_addr } => Some(*peer_addr),
-                    network::NetworkEvent::ConnectionLost { peer_addr } => Some(*peer_addr),
-                };
-                handlers::network_events::handle_network_event(
-                    &mut app_state, &database, &pool, from, event
-                ).await;
             }
 
             _ = tokio::time::sleep(timeout) => {

@@ -1,6 +1,53 @@
 use crate::db::models::{Conversation, Message, User};
 use crossterm::event::KeyEvent;
 use std::collections::HashMap;
+use std::time::Instant;
+
+/// Progress update from file transfer task
+#[derive(Debug, Clone)]
+pub enum TransferProgress {
+    BytesSent { transfer_id: String, bytes: u64 },
+    Completed { transfer_id: String },
+    Failed { transfer_id: String, error: String },
+}
+
+/// Tracks an active file transfer for progress display
+#[derive(Debug, Clone)]
+pub struct ActiveTransfer {
+    pub id: String,
+    pub filename: String,
+    pub file_size: u64,
+    pub bytes_transferred: u64,
+    pub is_upload: bool,
+    pub peer_name: String,
+    pub status: TransferStatus,
+    pub started_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransferStatus {
+    Pending,
+    InProgress,
+    Complete,
+    Failed(String),
+}
+
+impl ActiveTransfer {
+    pub fn progress_percent(&self) -> f64 {
+        if self.file_size == 0 {
+            return 100.0;
+        }
+        (self.bytes_transferred as f64 / self.file_size as f64) * 100.0
+    }
+    
+    pub fn speed_mbps(&self) -> f64 {
+        let elapsed = self.started_at.elapsed().as_secs_f64();
+        if elapsed < 0.001 {
+            return 0.0;
+        }
+        (self.bytes_transferred as f64 / elapsed) / (1024.0 * 1024.0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppState {
@@ -56,10 +103,25 @@ pub struct App {
 
     /// Whether this is the very first run (triggers welcome screen)
     pub first_run: bool,
+    
+    /// Active file transfers (for progress tracking)
+    pub active_transfers: Vec<ActiveTransfer>,
+    
+    /// Pending file path for /file command (set by command, actioned by main loop)
+    pub pending_file_send: Option<String>,
+    
+    /// Pending incoming file offers: transfer_id -> (filename, file_size, checksum, sender_id, sender_name)
+    pub pending_file_offers: HashMap<String, (String, u64, String, String, String)>,
+    
+    /// Transfers that were accepted and need to start sending chunks: (transfer_id, peer_id)
+    pub pending_chunk_sends: Vec<(String, String)>,
+    
+    /// Data directory for storing downloads etc
+    pub data_dir: std::path::PathBuf,
 }
 
 impl App {
-    pub fn new(my_username: String, my_user_id: String, port: u16) -> Self {
+    pub fn new(my_username: String, my_user_id: String, port: u16, data_dir: std::path::PathBuf) -> Self {
         App {
             state: AppState::UserList,
             selected_user_index: 0,
@@ -82,6 +144,11 @@ impl App {
             search_query: None,
             search_results: Vec::new(),
             first_run: false,
+            active_transfers: Vec::new(),
+            pending_file_send: None,
+            pending_file_offers: HashMap::new(),
+            pending_chunk_sends: Vec::new(),
+            data_dir,
         }
     }
 

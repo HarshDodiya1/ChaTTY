@@ -35,7 +35,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(vertical[1]);
 
     user_list::render(frame, app, horizontal[0]);
-    chat_view::render(frame, app, horizontal[1]);
+    
+    // Split chat area for file transfers if any active
+    let has_active_transfers = !app.active_transfers.is_empty();
+    if has_active_transfers {
+        let chat_split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(6)])
+            .split(horizontal[1]);
+        chat_view::render(frame, app, chat_split[0]);
+        file_transfer_ui::render(frame, app, chat_split[1]);
+    } else {
+        chat_view::render(frame, app, horizontal[1]);
+    }
 
     input_bar::render(frame, app, vertical[2]);
 

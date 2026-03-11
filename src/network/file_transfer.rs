@@ -3,12 +3,14 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::app::TransferProgress;
 use crate::db::{self, Database, FileTransfer};
 use crate::network::{ConnectionPool, NetworkMessage};
 
-pub const CHUNK_SIZE: usize = 64 * 1024;
+pub const CHUNK_SIZE: usize = 256 * 1024; // 256KB chunks for better speed
 pub const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
 pub struct FileTransferManager {
@@ -51,12 +53,11 @@ impl FileTransferManager {
         let checksum = compute_checksum(path).await?;
 
         let transfer_id = Uuid::new_v4().to_string();
-        let msg_id = Uuid::new_v4().to_string();
 
-        // Create DB record
+        // Create DB record (message_id is None until transfer completes)
         let ft = FileTransfer {
             id: transfer_id.clone(),
-            message_id: Some(msg_id.clone()),
+            message_id: None,  // No message yet - will be created when transfer completes
             filename: filename.clone(),
             file_path: path.to_string_lossy().to_string(),
             file_size: meta.len() as i64,
@@ -71,7 +72,7 @@ impl FileTransferManager {
         // Send FileOffer
         let offer = NetworkMessage::FileOffer {
             transfer_id: transfer_id.clone(),
-            message_id: msg_id.clone(),
+            message_id: transfer_id.clone(),  // Use transfer_id as message_id for protocol
             filename,
             file_size: meta.len(),
             checksum,
@@ -88,6 +89,7 @@ impl FileTransferManager {
         peer_id: &str,
         database: &Database,
         pool: &ConnectionPool,
+        progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
         let file_path = {
             let conn = database.lock();
@@ -100,6 +102,10 @@ impl FileTransferManager {
         };
 
         if file_path.is_empty() {
+            let _ = progress_tx.send(TransferProgress::Failed {
+                transfer_id: transfer_id.to_string(),
+                error: "Transfer not found".to_string(),
+            });
             bail!("Transfer {} not found in pending transfers", transfer_id);
         }
 
@@ -109,22 +115,24 @@ impl FileTransferManager {
         }
 
         let path = Path::new(&file_path);
+        let file_size = fs::metadata(path).await?.len();
         let mut file = fs::File::open(path)
             .await
             .with_context(|| format!("Cannot open {}", file_path))?;
 
         let mut chunk_index = 0u32;
+        let mut bytes_sent: u64 = 0;
         let mut buf = vec![0u8; CHUNK_SIZE];
+        
         loop {
             let n = file.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
+            
+            bytes_sent += n as u64;
+            let is_last = bytes_sent >= file_size;
             let data = buf[..n].to_vec();
-
-            // Peek ahead to determine is_last
-            let mut peek = [0u8; 1];
-            let is_last = file.read(&mut peek).await? == 0;
 
             let chunk = NetworkMessage::FileChunk {
                 transfer_id: transfer_id.to_string(),
@@ -133,20 +141,28 @@ impl FileTransferManager {
                 is_last,
             };
             pool.send_to(peer_id, &chunk).await?;
+            
+            // Send progress update
+            let _ = progress_tx.send(TransferProgress::BytesSent {
+                transfer_id: transfer_id.to_string(),
+                bytes: bytes_sent,
+            });
+            
             chunk_index += 1;
 
             if is_last {
                 break;
             }
-            // Seek back one byte we peeked (approximation — re-open for simplicity)
-            // In production, use a BufReader or track position differently.
-            // For now, rely on is_last detection from chunk size < CHUNK_SIZE.
         }
 
         {
             let conn = database.lock();
             db::update_transfer_status(&conn, transfer_id, "complete")?;
         }
+
+        let _ = progress_tx.send(TransferProgress::Completed {
+            transfer_id: transfer_id.to_string(),
+        });
 
         Ok(())
     }
