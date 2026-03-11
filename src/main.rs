@@ -457,6 +457,11 @@ async fn main() -> Result<()> {
                             if let Some(query) = app_state.search_query.clone() {
                                 run_search(&mut app_state, &database, &query);
                             }
+                            // Handle export command
+                            if app_state.export_requested {
+                                app_state.export_requested = false;
+                                export_conversation(&mut app_state, &database);
+                            }
                             // Handle file send command
                             if let Some(file_path) = app_state.pending_file_send.take() {
                                 if let Some(peer) = app_state.users.get(app_state.selected_user_index) {
@@ -604,6 +609,87 @@ fn run_search(app: &mut app::App, database: &Arc<Database>, query: &str) {
         Err(e) => {
             app.show_popup("Search Error", &e.to_string(), Some(3.0));
             app.search_query = None;
+        }
+    }
+}
+
+/// Export the current conversation to a text file.
+fn export_conversation(app: &mut app::App, database: &Arc<Database>) {
+    let conv_id = match &app.selected_conversation {
+        Some(id) => id.clone(),
+        None => {
+            app.show_popup("Export Error", "No conversation selected.", Some(3.0));
+            return;
+        }
+    };
+    
+    // Get peer name for filename
+    let peer_name = app.users
+        .get(app.selected_user_index)
+        .map(|u| u.display_name.clone())
+        .unwrap_or_else(|| "chat".to_string());
+    
+    let conn = database.lock();
+    let messages = match db::get_all_messages_for_conversation(&conn, &conv_id) {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            app.show_popup("Export Error", &format!("Failed to load messages: {}", e), Some(3.0));
+            return;
+        }
+    };
+    drop(conn);
+    
+    if messages.is_empty() {
+        app.show_popup("Export", "No messages to export.", Some(3.0));
+        return;
+    }
+    
+    // Build the export content
+    let mut content = String::new();
+    content.push_str(&format!("# ChaTTY Chat Export\n"));
+    content.push_str(&format!("# Conversation with: {}\n", peer_name));
+    content.push_str(&format!("# Exported: {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+    content.push_str(&format!("# Total messages: {}\n", messages.len()));
+    content.push_str("# ─────────────────────────────────────────\n\n");
+    
+    for msg in &messages {
+        let time = chrono::DateTime::parse_from_rfc3339(&msg.timestamp)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|_| msg.timestamp.clone());
+        
+        // Look up sender display name
+        let sender_name = if msg.sender_id == app.my_user_id {
+            app.my_username.clone()
+        } else {
+            app.users
+                .iter()
+                .find(|u| u.id == msg.sender_id)
+                .map(|u| u.display_name.clone())
+                .unwrap_or_else(|| msg.sender_id.clone())
+        };
+        
+        content.push_str(&format!("[{}] {}: {}\n", time, sender_name, msg.content));
+    }
+    
+    // Save to file in data_dir
+    let safe_name: String = peer_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("chat_{}_{}.txt", safe_name, timestamp);
+    let export_path = app.data_dir.join(&filename);
+    
+    match std::fs::write(&export_path, &content) {
+        Ok(_) => {
+            app.show_popup(
+                "Export Complete",
+                &format!("Chat exported to:\n{}\n\n{} messages saved.", export_path.display(), messages.len()),
+                None,
+            );
+        }
+        Err(e) => {
+            app.show_popup("Export Error", &format!("Failed to write file: {}", e), Some(3.0));
         }
     }
 }

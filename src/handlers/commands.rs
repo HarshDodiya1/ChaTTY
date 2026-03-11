@@ -25,7 +25,7 @@ pub fn handle_command(app: &mut App, input: &str) -> bool {
                  /group leave\n\
                  /group list\n\
                  /file <path>  /files\n\
-                 /search <query>  /history [n]\n\
+                 /search <query>  /export\n\
                  /info",
                 None,
             );
@@ -107,11 +107,14 @@ pub fn handle_command(app: &mut App, input: &str) -> bool {
                 app.search_results.clear();
             }
         }
-        "history" => {
-            // Signal main loop to load more history (n defaults to 100)
-            let n: i64 = rest.trim().parse().unwrap_or(100);
-            app.show_popup("History", &format!("Loading last {} messages…", n), Some(2.0));
-            // Main loop responds to search_query being None and loads via scroll
+        "history" | "export" => {
+            // Export the current conversation to a text file
+            if app.selected_conversation.is_none() {
+                app.show_popup("Error", "Open a conversation first to export.", Some(3.0));
+            } else {
+                // Signal main loop to export (needs DB access)
+                app.export_requested = true;
+            }
         }
         "info" => {
             let info = format!(

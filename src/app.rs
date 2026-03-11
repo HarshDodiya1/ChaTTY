@@ -118,6 +118,9 @@ pub struct App {
     
     /// Data directory for storing downloads etc
     pub data_dir: std::path::PathBuf,
+    
+    /// Flag to request chat export (handled by main loop)
+    pub export_requested: bool,
 }
 
 impl App {
@@ -149,6 +152,7 @@ impl App {
             pending_file_offers: HashMap::new(),
             pending_chunk_sends: Vec::new(),
             data_dir,
+            export_requested: false,
         }
     }
 

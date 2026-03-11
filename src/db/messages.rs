@@ -45,6 +45,27 @@ pub fn get_messages_for_conversation(
     Ok(messages)
 }
 
+/// Get all messages for a conversation (no limit).
+pub fn get_all_messages_for_conversation(
+    conn: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<Message>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, conversation_id, sender_id, content, content_type, timestamp, delivered, read
+         FROM messages
+         WHERE conversation_id = ?1
+         ORDER BY timestamp ASC",
+    )?;
+    let messages = stmt
+        .query_map(params![conversation_id], |row| {
+            Ok(row_to_message(row))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    Ok(messages)
+}
+
 pub fn get_undelivered_messages(conn: &Connection, _recipient_id: &str) -> Result<Vec<Message>> {
     let mut stmt = conn.prepare(
         "SELECT id, conversation_id, sender_id, content, content_type, timestamp, delivered, read

@@ -12,8 +12,8 @@ pub use conversations::{
 };
 pub use file_transfers::{get_pending_transfers, insert_file_transfer, update_transfer_status};
 pub use messages::{
-    get_messages_for_conversation, get_undelivered_messages, insert_message,
-    mark_message_delivered, mark_messages_read, search_messages,
+    get_all_messages_for_conversation, get_messages_for_conversation, get_undelivered_messages,
+    insert_message, mark_message_delivered, mark_messages_read, search_messages,
 };
 pub use models::*;
 pub use schema::init_db;

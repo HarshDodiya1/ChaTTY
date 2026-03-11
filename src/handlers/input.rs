@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const COMMANDS: &[&str] = &[
     "/help", "/quit", "/q", "/clear", "/nick", "/status",
-    "/group", "/file", "/files", "/search", "/history", "/info",
+    "/group", "/file", "/files", "/search", "/export", "/info",
 ];
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {

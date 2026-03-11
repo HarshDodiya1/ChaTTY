@@ -183,17 +183,31 @@ pub fn render_search_overlay(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Clear the background first
+    frame.render_widget(ratatui::widgets::Clear, area);
+
     let query = app.search_query.as_deref().unwrap_or("");
-    let title = format!(" Search: '{}' ", query);
+    let result_count = app.search_results.len();
+    let title = format!(" Search: '{}' ({} results) - Press Esc to close ", query, result_count);
 
     let items: Vec<ListItem> = if app.search_results.is_empty() {
-        vec![ListItem::new("No results.").style(Style::default().fg(Color::DarkGray))]
+        vec![ListItem::new("No results found.").style(Style::default().fg(Color::DarkGray))]
     } else {
         app.search_results
             .iter()
             .map(|m| {
                 let time = crate::utils::helpers::format_timestamp(&m.timestamp);
-                ListItem::new(format!("[{}] {}: {}", time, m.sender_id, m.content))
+                // Look up display name from sender_id
+                let sender_name = if m.sender_id == app.my_user_id {
+                    app.my_username.clone()
+                } else {
+                    app.users
+                        .iter()
+                        .find(|u| u.id == m.sender_id)
+                        .map(|u| u.display_name.clone())
+                        .unwrap_or_else(|| m.sender_id.clone())
+                };
+                ListItem::new(format!("[{}] {}: {}", time, sender_name, m.content))
             })
             .collect()
     };
@@ -201,7 +215,8 @@ pub fn render_search_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(Color::Yellow))
+        .style(Style::default().bg(Color::Black));
 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
