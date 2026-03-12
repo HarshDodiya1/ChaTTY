@@ -2,7 +2,7 @@
 ///
 /// These tests spin up real TcpServer instances on loopback addresses and
 /// verify that messages sent through PeerConnection are received.
-use ChaTTY::network::{NetworkEvent, NetworkMessage, TcpServer};
+use ChaTTY::network::{ConnectionPool, NetworkEvent, NetworkMessage, TcpServer};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -18,7 +18,8 @@ async fn start_server() -> (SocketAddr, mpsc::Receiver<NetworkEvent>) {
 
     let (tx, rx) = mpsc::channel(32);
     let server = TcpServer::new(addr.port());
-    server.start(tx);
+    let pool = ConnectionPool::new();
+    server.start(tx, pool);
 
     // Give the server a moment to start
     tokio::time::sleep(Duration::from_millis(50)).await;

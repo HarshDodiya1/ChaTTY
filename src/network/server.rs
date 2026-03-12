@@ -4,6 +4,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use super::client::{ConnectionPool, PeerConnection};
 use super::protocol::NetworkMessage;
 
 #[derive(Debug)]
@@ -31,7 +32,11 @@ impl TcpServer {
 
     /// Bind and start accepting connections. Returns a JoinHandle for the
     /// accept loop, plus the channel through which network events are delivered.
-    pub fn start(self, tx: mpsc::Sender<NetworkEvent>) -> JoinHandle<()> {
+    ///
+    /// The `pool` is used to store the write-half of accepted connections so
+    /// that replies (e.g. HelloAck) can be sent back on the same TCP stream
+    /// instead of requiring a separate outbound connection.
+    pub fn start(self, tx: mpsc::Sender<NetworkEvent>, pool: ConnectionPool) -> JoinHandle<()> {
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{}", self.port);
             let listener = match TcpListener::bind(&addr).await {
@@ -51,8 +56,24 @@ impl TcpServer {
                             .send(NetworkEvent::ConnectionEstablished { peer_addr })
                             .await;
 
+                        // Split the stream: store the write half in the pool
+                        // so replies can go back on this same connection.
+                        let (read_half, write_half) = stream.into_split();
+
+                        // Key the inbound connection by address; it will be
+                        // re-keyed to the peer's user_id once we receive their
+                        // Hello/HelloAck message.
+                        let inbound_key = format!("inbound-{}", peer_addr);
+                        let peer_conn = PeerConnection::from_write_half(write_half, peer_addr);
+                        pool.insert(&inbound_key, peer_conn).await;
+                        log::info!("Stored inbound write-half for {} as '{}'", peer_addr, inbound_key);
+
+                        let pool2 = pool.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, peer_addr, tx2).await;
+                            handle_connection(read_half, peer_addr, tx2).await;
+                            // Clean up inbound pool entry on disconnect
+                            let inbound_key = format!("inbound-{}", peer_addr);
+                            pool2.remove(&inbound_key).await;
                         });
                     }
                     Err(e) => {
@@ -65,7 +86,7 @@ impl TcpServer {
 }
 
 async fn handle_connection(
-    mut stream: tokio::net::TcpStream,
+    mut read_half: tokio::net::tcp::OwnedReadHalf,
     peer_addr: SocketAddr,
     tx: mpsc::Sender<NetworkEvent>,
 ) {
@@ -73,7 +94,7 @@ async fn handle_connection(
     loop {
         // Read 4-byte length prefix
         let mut len_buf = [0u8; 4];
-        match stream.read_exact(&mut len_buf).await {
+        match read_half.read_exact(&mut len_buf).await {
             Ok(_) => {}
             Err(_) => break,
         }
@@ -81,7 +102,7 @@ async fn handle_connection(
 
         // Read payload
         let mut payload = vec![0u8; len];
-        match stream.read_exact(&mut payload).await {
+        match read_half.read_exact(&mut payload).await {
             Ok(_) => {}
             Err(_) => break,
         }

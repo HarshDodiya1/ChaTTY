@@ -129,21 +129,26 @@ async fn handle_message(
             }
             app.status_message = format!("{} online peers", app.online_count());
 
-            // Establish a reverse connection to the sender so we can send HelloAck
-            // and future messages. The sender's LISTENING port comes from the Hello
-            // message (not the ephemeral TCP source port).
-            let peer_listen_addr = SocketAddr::new(from.ip(), port);
+            // Try to reuse the inbound TCP connection (stored by the server)
+            // instead of opening a new outbound connection, which may fail if the
+            // peer's port is firewalled.
+            let inbound_key = format!("inbound-{}", from);
             
-            // Remove any stale connection for this peer before reconnecting.
-            // This handles the case where a peer restarts and sends a new Hello.
+            // Remove any stale connection for this peer before re-keying.
             pool.remove(&user_id).await;
             
-            match pool.get_or_connect(&user_id, peer_listen_addr).await {
-                Ok(_) => {
-                    log::info!("Reverse connection to {} established", peer_listen_addr);
-                }
-                Err(e) => {
-                    log::warn!("Failed to establish reverse connection to {}: {}", peer_listen_addr, e);
+            if pool.rename(&inbound_key, &user_id).await {
+                log::info!("Re-keyed inbound connection from '{}' to user_id '{}'", inbound_key, user_id);
+            } else {
+                // No inbound connection available — try outbound as fallback
+                let peer_listen_addr = SocketAddr::new(from.ip(), port);
+                match pool.get_or_connect(&user_id, peer_listen_addr).await {
+                    Ok(_) => {
+                        log::info!("Outbound reverse connection to {} established", peer_listen_addr);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to establish reverse connection to {}: {}", peer_listen_addr, e);
+                    }
                 }
             }
 
@@ -156,7 +161,7 @@ async fn handle_message(
                 public_key: vec![],
             };
             match pool.send_to(&user_id, &ack).await {
-                Ok(_) => log::info!("Sent HelloAck to '{}'", username),
+                Ok(_) => log::info!("Sent HelloAck to '{}' (id={})", username, user_id),
                 Err(e) => log::warn!("Failed to send HelloAck to '{}': {}", username, e),
             }
 
@@ -192,16 +197,17 @@ async fn handle_message(
             }
             drop(conn);
 
-            // Ensure we have a connection to this peer in the pool keyed by
-            // their real user_id.  Do NOT remove the old "manual-*" entry
-            // here — dropping that write-half closes the TCP stream, which
-            // triggers a spurious ConnectionLost on the *remote* peer and
-            // can mark us offline in their sidebar.  The manual entry is
-            // harmless (unused after the real key exists) and will be
-            // cleaned up on shutdown.
-            let peer_listen_addr = SocketAddr::new(from.ip(), port);
-            if let Err(e) = pool.get_or_connect(&user_id, peer_listen_addr).await {
-                log::warn!("Failed to ensure connection to {} after HelloAck: {}", peer_listen_addr, e);
+            // Re-key the inbound connection to this peer's user_id, same
+            // approach as the Hello handler.
+            let inbound_key = format!("inbound-{}", from);
+            if pool.rename(&inbound_key, &user_id).await {
+                log::info!("Re-keyed inbound connection from '{}' to user_id '{}' (HelloAck)", inbound_key, user_id);
+            } else if !pool.has_connection(&user_id).await {
+                // No inbound connection and no existing outbound — try connect
+                let peer_listen_addr = SocketAddr::new(from.ip(), port);
+                if let Err(e) = pool.get_or_connect(&user_id, peer_listen_addr).await {
+                    log::warn!("Failed to ensure connection to {} after HelloAck: {}", peer_listen_addr, e);
+                }
             }
 
             if let Some(u) = app.users.iter_mut().find(|u| u.id == user_id) {

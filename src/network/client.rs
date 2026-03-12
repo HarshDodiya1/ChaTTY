@@ -35,6 +35,14 @@ impl PeerConnection {
         })
     }
 
+    /// Wrap an already-accepted write half (from the TCP server) as a PeerConnection.
+    pub fn from_write_half(write: tokio::net::tcp::OwnedWriteHalf, addr: SocketAddr) -> Self {
+        PeerConnection {
+            writer: Arc::new(Mutex::new(Some(write))),
+            addr,
+        }
+    }
+
     /// Serialize, frame, and write a message to this peer.
     pub async fn send(&self, message: &NetworkMessage) -> Result<()> {
         let frame = message.to_frame()?;
@@ -95,6 +103,23 @@ impl ConnectionPool {
             .await
             .insert(peer_id.to_string(), conn.clone());
         Ok(conn)
+    }
+
+    /// Insert a pre-built connection into the pool.
+    pub async fn insert(&self, key: &str, conn: PeerConnection) {
+        self.conns.lock().await.insert(key.to_string(), conn);
+    }
+
+    /// Re-key a connection: move the entry from `old_key` to `new_key`.
+    /// Returns true if the rename happened, false if `old_key` was not found.
+    pub async fn rename(&self, old_key: &str, new_key: &str) -> bool {
+        let mut guard = self.conns.lock().await;
+        if let Some(conn) = guard.remove(old_key) {
+            guard.insert(new_key.to_string(), conn);
+            true
+        } else {
+            false
+        }
     }
 
     /// Remove a peer from the pool (e.g. after disconnect).

@@ -38,9 +38,9 @@ impl NetworkManager {
     pub fn start(self) -> Result<(JoinHandle<()>, mpsc::Receiver<NetworkEvent>)> {
         let (tx, rx) = mpsc::channel::<NetworkEvent>(256);
 
-        // Start TCP server
+        // Start TCP server — pass the pool so inbound write-halves are stored
         let server = TcpServer::new(self.config.port);
-        let handle = server.start(tx.clone());
+        let handle = server.start(tx.clone(), self.pool.clone());
 
         // Start mDNS — advertise and browse
         let discovery = DiscoveryService::new(
