@@ -76,21 +76,11 @@ pub fn update_user_status(
 }
 
 pub fn upsert_user(conn: &Connection, user: &User) -> Result<()> {
-    // If another user row has the same username but different id, delete it first.
-    // This happens when a peer reinstalls or uses a different machine with the
-    // same --name flag, generating a fresh UUID.  The schema has UNIQUE(username)
-    // which would otherwise cause the INSERT to fail with a constraint error.
-    conn.execute(
-        "DELETE FROM users WHERE username = ?1 AND id != ?2",
-        params![user.username, user.id],
-    )
-    .ok(); // best-effort cleanup
-
     conn.execute(
         "INSERT INTO users (id, username, display_name, ip_address, port, status, last_seen, public_key)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(id) DO UPDATE SET
-             username     = excluded.username,
+         ON CONFLICT(username) DO UPDATE SET
+             id           = excluded.id,
              display_name = excluded.display_name,
              ip_address   = excluded.ip_address,
              port         = excluded.port,

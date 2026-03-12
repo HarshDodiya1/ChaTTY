@@ -25,3 +25,5 @@ target
 #.idea/
 warnings.md
 DOCKER.md
+.DS_Store
+WORK.md
