@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
     log::info!("Starting network: port={}, user_id={}", config.port, user_id);
     let net_manager = network::NetworkManager::new(&config, user_id.clone());
     let pool = net_manager.pool.clone();
-    let (_server_handle, mut net_rx) = net_manager.start()?;
+    let (_server_handle, mut net_rx) = net_manager.start().await?;
     log::info!("Network started, TCP server listening on 0.0.0.0:{}", config.port);
 
     // ── File Transfer Manager ─────────────────────────────────────────────

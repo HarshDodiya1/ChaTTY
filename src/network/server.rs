@@ -1,10 +1,9 @@
 use std::net::SocketAddr;
-use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::client::{ConnectionPool, PeerConnection};
+use super::client::{spawn_reader, ConnectionPool, PeerConnection};
 use super::protocol::NetworkMessage;
 
 #[derive(Debug)]
@@ -68,13 +67,11 @@ impl TcpServer {
                         pool.insert(&inbound_key, peer_conn).await;
                         log::info!("Stored inbound write-half for {} as '{}'", peer_addr, inbound_key);
 
-                        let pool2 = pool.clone();
-                        tokio::spawn(async move {
-                            handle_connection(read_half, peer_addr, tx2).await;
-                            // Clean up inbound pool entry on disconnect
-                            let inbound_key = format!("inbound-{}", peer_addr);
-                            pool2.remove(&inbound_key).await;
-                        });
+                        // Spawn a reader that feeds messages into the event channel.
+                        spawn_reader(read_half, peer_addr, tx.clone());
+                        // NOTE: cleanup of inbound-* pool entries happens via
+                        // ConnectionLost events in the main event loop or when
+                        // the key is renamed to the peer's user_id.
                     }
                     Err(e) => {
                         eprintln!("Accept error: {}", e);
@@ -83,46 +80,4 @@ impl TcpServer {
             }
         })
     }
-}
-
-async fn handle_connection(
-    mut read_half: tokio::net::tcp::OwnedReadHalf,
-    peer_addr: SocketAddr,
-    tx: mpsc::Sender<NetworkEvent>,
-) {
-    log::info!("Handling incoming connection from {}", peer_addr);
-    loop {
-        // Read 4-byte length prefix
-        let mut len_buf = [0u8; 4];
-        match read_half.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        let len = u32::from_be_bytes(len_buf) as usize;
-
-        // Read payload
-        let mut payload = vec![0u8; len];
-        match read_half.read_exact(&mut payload).await {
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        match NetworkMessage::deserialize(&payload) {
-            Ok(message) => {
-                log::debug!("Received message from {}: {:?}", peer_addr, std::mem::discriminant(&message));
-                if tx
-                    .send(NetworkEvent::MessageReceived { from: peer_addr, message })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("Deserialize error from {}: {}", peer_addr, e);
-            }
-        }
-    }
-
-    let _ = tx.send(NetworkEvent::ConnectionLost { peer_addr }).await;
 }

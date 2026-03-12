@@ -25,5 +25,7 @@ target
 #.idea/
 warnings.md
 DOCKER.md
+my-logs.txt
+peer-pc-logs.txt
 .DS_Store
-WORK.md
+peer-pc-logs.txt

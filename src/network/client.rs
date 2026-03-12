@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 
 use super::protocol::NetworkMessage;
+use super::server::NetworkEvent;
 
 /// An active TCP connection to a single peer.
 #[derive(Clone)]
@@ -20,19 +21,24 @@ pub struct PeerConnection {
 
 impl PeerConnection {
     /// Connect to `addr` with a 5-second timeout.
-    pub async fn connect(addr: SocketAddr) -> Result<Self> {
+    /// Returns the PeerConnection (write-half) and the read-half so the caller
+    /// can spawn a reader task.
+    pub async fn connect(addr: SocketAddr) -> Result<(Self, tokio::net::tcp::OwnedReadHalf)> {
         log::debug!("Connecting to {}...", addr);
         let stream = timeout(Duration::from_secs(5), TcpStream::connect(addr))
             .await
             .with_context(|| format!("Connection to {} timed out", addr))?
             .with_context(|| format!("Failed to connect to {}", addr))?;
 
-        let (_read, write) = stream.into_split();
+        let (read, write) = stream.into_split();
 
-        Ok(PeerConnection {
-            writer: Arc::new(Mutex::new(Some(write))),
-            addr,
-        })
+        Ok((
+            PeerConnection {
+                writer: Arc::new(Mutex::new(Some(write))),
+                addr,
+            },
+            read,
+        ))
     }
 
     /// Wrap an already-accepted write half (from the TCP server) as a PeerConnection.
@@ -65,16 +71,72 @@ impl PeerConnection {
     }
 }
 
+/// Spawn a reader task that reads framed messages from a TCP read-half and
+/// forwards them as `NetworkEvent::MessageReceived` to the event channel.
+/// This is used for BOTH inbound (server-accepted) and outbound connections.
+pub fn spawn_reader(
+    mut read_half: tokio::net::tcp::OwnedReadHalf,
+    peer_addr: SocketAddr,
+    tx: mpsc::Sender<NetworkEvent>,
+) {
+    tokio::spawn(async move {
+        loop {
+            // Read 4-byte length prefix
+            let mut len_buf = [0u8; 4];
+            match read_half.read_exact(&mut len_buf).await {
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            let len = u32::from_be_bytes(len_buf) as usize;
+
+            // Read payload
+            let mut payload = vec![0u8; len];
+            match read_half.read_exact(&mut payload).await {
+                Ok(_) => {}
+                Err(_) => break,
+            }
+
+            match NetworkMessage::deserialize(&payload) {
+                Ok(message) => {
+                    log::debug!(
+                        "Received message from {}: {:?}",
+                        peer_addr,
+                        std::mem::discriminant(&message)
+                    );
+                    if tx
+                        .send(NetworkEvent::MessageReceived {
+                            from: peer_addr,
+                            message,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Deserialize error from {}: {}", peer_addr, e);
+                }
+            }
+        }
+
+        let _ = tx.send(NetworkEvent::ConnectionLost { peer_addr }).await;
+    });
+}
+
 /// A thread-safe pool of active peer connections.
 #[derive(Clone)]
 pub struct ConnectionPool {
     conns: Arc<Mutex<HashMap<String, PeerConnection>>>,
+    /// Event sender for spawning reader tasks on new outbound connections.
+    event_tx: Arc<Mutex<Option<mpsc::Sender<NetworkEvent>>>>,
 }
 
 impl Default for ConnectionPool {
     fn default() -> Self {
         ConnectionPool {
             conns: Arc::new(Mutex::new(HashMap::new())),
+            event_tx: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -84,7 +146,15 @@ impl ConnectionPool {
         ConnectionPool::default()
     }
 
+    /// Set the event sender so outbound connections can spawn reader tasks.
+    /// Must be called after the event channel is created.
+    pub async fn set_event_sender(&self, tx: mpsc::Sender<NetworkEvent>) {
+        *self.event_tx.lock().await = Some(tx);
+    }
+
     /// Return existing connection or connect fresh.
+    /// If an event sender has been set, spawns a reader task for new
+    /// outbound connections so that replies can be received.
     pub async fn get_or_connect(
         &self,
         peer_id: &str,
@@ -97,7 +167,16 @@ impl ConnectionPool {
             }
         }
 
-        let conn = PeerConnection::connect(addr).await?;
+        let (conn, read_half) = PeerConnection::connect(addr).await?;
+
+        // Spawn a reader task so we can receive replies on this connection
+        if let Some(tx) = self.event_tx.lock().await.clone() {
+            log::info!("Spawning reader for outbound connection to {}", addr);
+            spawn_reader(read_half, addr, tx);
+        } else {
+            log::warn!("No event sender set — outbound connection to {} will be write-only", addr);
+        }
+
         self.conns
             .lock()
             .await

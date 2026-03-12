@@ -31,7 +31,7 @@ async fn test_server_accepts_connection() {
     let (addr, mut rx) = start_server().await;
 
     // Connect from client side
-    ChaTTY::network::PeerConnection::connect(addr)
+    let (_conn, _read) = ChaTTY::network::PeerConnection::connect(addr)
         .await
         .expect("connect failed");
 
@@ -53,7 +53,7 @@ async fn test_server_accepts_connection() {
 async fn test_send_and_receive_message() {
     let (addr, mut rx) = start_server().await;
 
-    let conn = ChaTTY::network::PeerConnection::connect(addr)
+    let (conn, _read) = ChaTTY::network::PeerConnection::connect(addr)
         .await
         .expect("connect failed");
 
@@ -91,7 +91,7 @@ async fn test_send_and_receive_message() {
 #[tokio::test]
 async fn test_multiple_messages() {
     let (addr, mut rx) = start_server().await;
-    let conn = ChaTTY::network::PeerConnection::connect(addr)
+    let (conn, _read) = ChaTTY::network::PeerConnection::connect(addr)
         .await
         .unwrap();
 
@@ -130,7 +130,7 @@ async fn test_multiple_messages() {
 #[tokio::test]
 async fn test_ping_pong_roundtrip() {
     let (addr, mut rx) = start_server().await;
-    let conn = ChaTTY::network::PeerConnection::connect(addr).await.unwrap();
+    let (conn, _read) = ChaTTY::network::PeerConnection::connect(addr).await.unwrap();
 
     conn.send(&NetworkMessage::Ping).await.unwrap();
 

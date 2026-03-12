@@ -35,8 +35,11 @@ impl NetworkManager {
 
     /// Start the TCP server and mDNS discovery. Returns a join handle for the
     /// server task and a receiver for all incoming `NetworkEvent`s.
-    pub fn start(self) -> Result<(JoinHandle<()>, mpsc::Receiver<NetworkEvent>)> {
+    pub async fn start(self) -> Result<(JoinHandle<()>, mpsc::Receiver<NetworkEvent>)> {
         let (tx, rx) = mpsc::channel::<NetworkEvent>(256);
+
+        // Set event sender on the pool so outbound connections spawn reader tasks
+        self.pool.set_event_sender(tx.clone()).await;
 
         // Start TCP server — pass the pool so inbound write-halves are stored
         let server = TcpServer::new(self.config.port);
