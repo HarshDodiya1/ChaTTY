@@ -24,17 +24,41 @@ pub async fn handle_network_event(
         NetworkEvent::ConnectionLost { peer_addr } => {
             log::info!("TCP connection lost: {}", peer_addr);
             let ip = peer_addr.ip().to_string();
-            let conn = database.lock();
-            for user in &mut app.users {
+
+            // Collect peers at this IP that no longer have a pool connection.
+            // If the pool still holds a write-half for the peer (keyed by
+            // their user_id), the peer is still reachable — the closed
+            // connection was just a redundant/manual one.
+            let mut offline_peers: Vec<(String, String)> = Vec::new();
+            for user in app.users.iter() {
                 if user.ip_address.as_deref() == Some(&ip) {
-                    log::info!("Marking user '{}' ({}) as offline", user.display_name, user.id);
-                    user.status = "offline".to_string();
+                    if !pool.has_connection(&user.id).await {
+                        offline_peers.push((user.id.clone(), user.display_name.clone()));
+                    } else {
+                        log::info!(
+                            "Connection lost from {} but peer '{}' still has active pool connection, skipping offline",
+                            peer_addr, user.display_name
+                        );
+                    }
+                }
+            }
+
+            if !offline_peers.is_empty() {
+                let conn = database.lock();
+                for (peer_id, display_name) in &offline_peers {
+                    log::info!("Marking user '{}' ({}) as offline", display_name, peer_id);
                     let _ = db::update_user_status(
                         &conn,
-                        &user.id,
+                        peer_id,
                         "offline",
                         &Utc::now().to_rfc3339(),
                     );
+                }
+                drop(conn);
+                for (peer_id, _) in &offline_peers {
+                    if let Some(user) = app.users.iter_mut().find(|u| u.id == *peer_id) {
+                        user.status = "offline".to_string();
+                    }
                 }
             }
         }
@@ -168,12 +192,14 @@ async fn handle_message(
             }
             drop(conn);
 
-            // Ensure we have a connection to this peer in the pool.
-            // Also clean up any stale "manual-*" pool entry that was used
-            // during --peer bootstrap (it used a temporary peer id).
+            // Ensure we have a connection to this peer in the pool keyed by
+            // their real user_id.  Do NOT remove the old "manual-*" entry
+            // here — dropping that write-half closes the TCP stream, which
+            // triggers a spurious ConnectionLost on the *remote* peer and
+            // can mark us offline in their sidebar.  The manual entry is
+            // harmless (unused after the real key exists) and will be
+            // cleaned up on shutdown.
             let peer_listen_addr = SocketAddr::new(from.ip(), port);
-            let manual_key = format!("manual-{}", peer_listen_addr);
-            pool.remove(&manual_key).await;
             if let Err(e) = pool.get_or_connect(&user_id, peer_listen_addr).await {
                 log::warn!("Failed to ensure connection to {} after HelloAck: {}", peer_listen_addr, e);
             }

@@ -116,6 +116,11 @@ impl ConnectionPool {
         Ok(())
     }
 
+    /// Check if a connection exists for a given peer_id.
+    pub async fn has_connection(&self, peer_id: &str) -> bool {
+        self.conns.lock().await.contains_key(peer_id)
+    }
+
     /// Broadcast a message to every connected peer.
     pub async fn broadcast(&self, message: &NetworkMessage) -> Result<()> {
         let conns: Vec<PeerConnection> = self.conns.lock().await.values().cloned().collect();
