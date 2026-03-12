@@ -21,7 +21,7 @@ ChaTTY is a peer-to-peer LAN terminal chat application written in Rust. It runs 
 | Language | Rust 2021 Edition |
 | Terminal UI | ratatui 0.28 + crossterm 0.28 |
 | Async runtime | Tokio (full features) |
-| Peer discovery | mDNS via mdns-sd (`_ChaTTY._tcp.local.`) |
+| Peer discovery | mDNS via mdns-sd (`_chatty._tcp.local.`) |
 | Transport | TCP (default port 7878) |
 | Wire protocol | bincode with 4-byte big-endian length framing |
 | Persistence | SQLite via rusqlite (bundled) |
@@ -403,6 +403,14 @@ Your private key is stored at `~/.ChaTTY/private.key` with file permissions `600
 **Peers are not appearing in my user list.**
 - Ensure both machines are on the same LAN/subnet. mDNS does not cross router boundaries.
 - Check that UDP port 5353 (mDNS) and TCP port 7878 (or your configured port) are not blocked by a firewall.
+- Many WiFi routers enable "AP Isolation" or "Client Isolation" which blocks peer-to-peer traffic. Use the `--peer` flag to connect manually:
+  ```bash
+  # On machine A (192.168.1.10):
+  ChaTTY --name alice --peer 192.168.1.20:7878
+  
+  # On machine B (192.168.1.20):
+  ChaTTY --name bob --peer 192.168.1.10:7878
+  ```
 - Try running with `RUST_LOG=debug ChaTTY` and look for mDNS discovery messages.
 
 **Messages are not being delivered.**

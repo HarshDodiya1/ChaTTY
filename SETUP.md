@@ -17,23 +17,52 @@ A peer-to-peer LAN terminal chat app. No servers, no accounts — just you and y
 
 ## Installation
 
-### Option 1: Build from source
+### Option 1: Build from source (recommended)
 
 ```bash
 git clone <repo-url> && cd ChaTTY
 cargo build --release
 ```
 
-The binary is at `target/release/ChaTTY`. Optionally install it system-wide:
+The binary is created at `./target/release/ChaTTY`.
 
+**To run it directly (without installing):**
 ```bash
-sudo cp target/release/ChaTTY /usr/local/bin/
+./target/release/ChaTTY --name yourname
 ```
 
-### Option 2: cargo install (if published)
+**To install system-wide (so you can run `ChaTTY` from anywhere):**
+```bash
+# Linux/macOS - install to /usr/local/bin
+sudo cp target/release/ChaTTY /usr/local/bin/
+
+# Or install to your user's bin directory (no sudo needed)
+mkdir -p ~/.local/bin
+cp target/release/ChaTTY ~/.local/bin/
+
+# Make sure ~/.local/bin is in your PATH (add to ~/.bashrc or ~/.zshrc if not)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Option 2: cargo install
 
 ```bash
-cargo install chatty
+# From the project directory
+cargo install --path .
+
+# This installs to ~/.cargo/bin/ which should already be in your PATH
+```
+
+### Verify installation
+
+```bash
+# Check if ChaTTY is accessible
+which ChaTTY
+# Should output: /usr/local/bin/ChaTTY or ~/.local/bin/ChaTTY or ~/.cargo/bin/ChaTTY
+
+# Or just run it
+ChaTTY --help
 ```
 
 ---
@@ -43,7 +72,11 @@ cargo install chatty
 ### 1. First run
 
 ```bash
+# If installed system-wide:
 ChaTTY --name yourname
+
+# Or if running from build directory:
+./target/release/ChaTTY --name yourname
 ```
 
 This creates `~/.ChaTTY/` with:
@@ -79,6 +112,9 @@ If both machines are on the same LAN, **mDNS auto-discovery** will find each oth
 | `--help` | Show help | — |
 
 ### Examples
+
+> **Note:** All examples below assume ChaTTY is installed in your PATH.  
+> If not, replace `ChaTTY` with `./target/release/ChaTTY`
 
 ```bash
 # Basic usage
@@ -157,12 +193,20 @@ mDNS discovery doesn't work between two instances on the same computer (the syst
 
 **Terminal 1:**
 ```bash
+# If installed:
 ChaTTY --name alice --port 7878 --data-dir ~/.ChaTTY-alice
+
+# Or from build directory:
+./target/release/ChaTTY --name alice --port 7878 --data-dir ~/.ChaTTY-alice
 ```
 
 **Terminal 2:**
 ```bash
+# If installed:
 ChaTTY --name bob --port 7879 --data-dir ~/.ChaTTY-bob --peer 127.0.0.1:7878
+
+# Or from build directory:
+./target/release/ChaTTY --name bob --port 7879 --data-dir ~/.ChaTTY-bob --peer 127.0.0.1:7878
 ```
 
 Bob will connect to alice directly. Both will see each other in the sidebar.
@@ -201,11 +245,40 @@ RUST_LOG=debug ChaTTY --name alice
 
 | Problem | Solution |
 |---------|----------|
+| `ChaTTY: command not found` | The binary isn't in your PATH. Either run `./target/release/ChaTTY` directly, or install it (see Installation section above) |
+| **Peers not appearing (different machines on same WiFi)** | Most WiFi routers have "Client Isolation" / "AP Isolation" enabled, which blocks mDNS. **Use `--peer` flag instead** (see below) |
 | Peer not appearing in sidebar | Check both are on same LAN. Try `--peer <ip>:<port>` |
 | "Address already in use" | Another ChaTTY (or other app) is using that port. Use `--port <different-port>` |
 | Firewall blocking | Allow TCP on port 7878 and UDP on port 5353 (mDNS) |
 | Messages not sending | Check `chatty.log` for connection errors |
 | TUI display broken | Run `reset` in terminal, then restart ChaTTY |
+
+### Peers not showing up? Use --peer flag
+
+**mDNS auto-discovery often fails** on WiFi networks due to router settings (AP isolation, multicast filtering). The solution is to connect directly using IP addresses:
+
+**Step 1: Find your IP address**
+```bash
+# Linux
+ip addr show | grep "inet " | grep -v 127.0.0.1
+
+# macOS  
+ifconfig | grep "inet " | grep -v 127.0.0.1
+```
+
+**Step 2: Start ChaTTY on both machines with --peer**
+
+Machine A (IP: 192.168.1.10):
+```bash
+./target/release/ChaTTY --name harsh --peer 192.168.1.20:7878
+```
+
+Machine B (IP: 192.168.1.20):
+```bash
+./target/release/ChaTTY --name rishabh --peer 192.168.1.10:7878
+```
+
+**Important:** Both machines should use `--peer` pointing to each other for reliable two-way connection.
 
 ### Firewall rules (if needed)
 

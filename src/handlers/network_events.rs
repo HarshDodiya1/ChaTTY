@@ -74,7 +74,9 @@ async fn handle_message(
                 last_seen: Some(Utc::now().to_rfc3339()),
                 public_key: None,
             };
-            let _ = db::upsert_user(&conn, &user);
+            if let Err(e) = db::upsert_user(&conn, &user) {
+                log::error!("Failed to upsert user '{}' (id={}): {}", username, user_id, e);
+            }
             drop(conn);
 
             // Update app user list
@@ -161,11 +163,17 @@ async fn handle_message(
                 last_seen: Some(Utc::now().to_rfc3339()),
                 public_key: None,
             };
-            let _ = db::upsert_user(&conn, &user);
+            if let Err(e) = db::upsert_user(&conn, &user) {
+                log::error!("Failed to upsert user '{}' (id={}): {}", username, user_id, e);
+            }
             drop(conn);
 
-            // Ensure we have a connection to this peer in the pool
+            // Ensure we have a connection to this peer in the pool.
+            // Also clean up any stale "manual-*" pool entry that was used
+            // during --peer bootstrap (it used a temporary peer id).
             let peer_listen_addr = SocketAddr::new(from.ip(), port);
+            let manual_key = format!("manual-{}", peer_listen_addr);
+            pool.remove(&manual_key).await;
             if let Err(e) = pool.get_or_connect(&user_id, peer_listen_addr).await {
                 log::warn!("Failed to ensure connection to {} after HelloAck: {}", peer_listen_addr, e);
             }

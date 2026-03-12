@@ -708,6 +708,15 @@ fn load_conversation(
 
     log::info!("Loading conversation with '{}' (id={})", peer.display_name, peer.id);
     let conn = database.lock();
+
+    // Ensure the peer exists in the DB before creating a conversation.
+    // The peer might be in-memory (from Hello/HelloAck) but missing from the
+    // DB if a previous upsert_user failed silently.
+    if db::get_user_by_id(&conn, &peer.id)?.is_none() {
+        log::warn!("Peer '{}' (id={}) not in DB, inserting now", peer.display_name, peer.id);
+        db::upsert_user(&conn, &peer)?;
+    }
+
     let conv = db::get_or_create_direct_conversation(&conn, my_user_id, &peer.id)?;
     app.selected_conversation = Some(conv.id.clone());
 

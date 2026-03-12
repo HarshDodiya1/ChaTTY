@@ -27,7 +27,7 @@ async fn test_compute_checksum_small_file() {
 
 #[tokio::test]
 async fn test_compute_checksum_deterministic() {
-    let mut tmp = NamedTempFile::new().unwrap();
+    let mut tmp: NamedTempFile = NamedTempFile::new().unwrap();
     let data = vec![0xABu8; 1024];
     tmp.write_all(&data).unwrap();
     tmp.flush().unwrap();
