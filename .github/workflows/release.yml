@@ -114,16 +114,8 @@ jobs:
           git push
 
   verify-brew:
-    name: brew install (${{ matrix.os }})
+    name: Verify Homebrew install
     needs: homebrew
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-    steps:
-      - uses: Homebrew/actions/setup-homebrew@master
-      - run: brew install "${TAP_REPO%/homebrew-tap}/tap/chatty"
-      - run: brew test chatty
-      - run: test "$(chatty --version)" = "${GITHUB_REF_NAME#v}"
+    uses: ./.github/workflows/verify-brew.yml
+    with:
+      version: ${{ github.ref_name }}

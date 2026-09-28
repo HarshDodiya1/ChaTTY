@@ -1,0 +1,39 @@
+name: Verify Homebrew install
+
+# Installs ChaTTY from the tap on macOS and Linux and runs `brew test`.
+# Called by the release workflow; can also be run by hand.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Expected version (e.g. v2.0.0)
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Expected version (e.g. v2.0.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  brew:
+    name: brew install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      EXPECTED: ${{ inputs.version }}
+    steps:
+      - uses: Homebrew/actions/setup-homebrew@main
+      - run: brew install HarshDodiya1/tap/chatty
+      - run: brew test chatty
+      - name: Check version
+        run: test "$(chatty --version)" = "${EXPECTED#v}"
