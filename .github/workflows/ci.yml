@@ -16,6 +16,7 @@ jobs:
   check:
     name: Lint & typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -31,6 +32,7 @@ jobs:
     name: Build & smoke test (${{ matrix.os }})
     needs: check
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

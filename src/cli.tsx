@@ -172,6 +172,8 @@ async function main() {
   };
 
   const instance = render(<App engine={engine} onQuit={shutdown} startupNotices={notices} />, {
+    // Ink turns itself non-interactive when CI=true; we always have a TTY here.
+    interactive: true,
     alternateScreen: true,
     incrementalRendering: true,
     exitOnCtrlC: false,

@@ -79,6 +79,13 @@ const common = ["--no-mdns"];
 let a: Instance | undefined;
 let b: Instance | undefined;
 
+// Never hang CI: give the whole run a hard deadline.
+const deadline = setTimeout(() => {
+  console.error("✖ smoke test exceeded 90s");
+  for (const inst of [a, b]) inst?.proc.kill("SIGKILL");
+  process.exit(1);
+}, 90_000);
+
 console.log(`ChaTTY smoke test — ${baseCmd.join(" ")}`);
 try {
   a = launch("A", ["--name", "smoke-a", "--port", String(portA), "--data-dir", path.join(tmp, "a"), ...common]);
@@ -121,4 +128,7 @@ try {
 } finally {
   for (const inst of [a, b]) if (inst && inst.proc.exitCode === null) inst.proc.kill("SIGKILL");
   fs.rmSync(tmp, { recursive: true, force: true });
+  clearTimeout(deadline);
 }
+// Open PTY handles can keep the event loop alive; exit explicitly.
+process.exit(process.exitCode ?? 0);

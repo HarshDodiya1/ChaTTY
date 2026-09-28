@@ -17,6 +17,7 @@ jobs:
   build:
     name: Build ${{ matrix.targets }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: true
       matrix:
@@ -53,6 +54,7 @@ jobs:
     name: GitHub release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -75,6 +77,7 @@ jobs:
     needs: publish
     if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check tap token
         env:
@@ -114,6 +117,7 @@ jobs:
     name: brew install (${{ matrix.os }})
     needs: homebrew
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
