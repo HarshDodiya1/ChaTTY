@@ -1,0 +1,45 @@
+{
+  "name": "chatty-v2",
+  "version": "2.0.0",
+  "description": "P2P LAN terminal chat with end-to-end encryption \u2014 TypeScript + Bun rewrite of ChaTTY",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "chatty": "./src/cli.tsx"
+  },
+  "scripts": {
+    "start": "bun run src/cli.tsx",
+    "dev": "bun --watch run src/cli.tsx",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run lint && bun run typecheck",
+    "build": "bun scripts/build.ts",
+    "build:all": "bun scripts/build.ts darwin-arm64 darwin-x64 linux-x64 linux-arm64",
+    "smoke": "bun scripts/smoke.ts",
+    "formula": "bun scripts/formula.ts"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "dependencies": {
+    "bonjour-service": "^1.4.4",
+    "ink": "^7.1.1",
+    "react": "^19.3.0",
+    "string-width": "^8.3.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "@types/bun": "^1.4.2",
+    "@types/react": "^19.3.0",
+    "@xterm/headless": "^6.0.0",
+    "ink-testing-library": "^4.0.0",
+    "react-devtools-core": "^8.0.0",
+    "typescript": "^7.0.2"
+  },
+  "packageManager": "bun@1.3.11",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarshDodiya1/ChaTTY.git"
+  }
+}

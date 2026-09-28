@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint & typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
+      - name: Lint & format (Biome)
+        run: bun run lint
+      - name: Typecheck
+        run: bun run typecheck
+
+  smoke:
+    name: Build & smoke test (${{ matrix.os }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
+      - name: Smoke test from source
+        run: bun scripts/smoke.ts
+      - name: Compile host binary
+        run: bun scripts/build.ts
+      - name: Smoke test compiled binary
+        shell: bash
+        run: |
+          target="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')"
+          ./dist/$target/chatty --version
+          ./dist/$target/chatty --help > /dev/null
+          bun scripts/smoke.ts "dist/$target/chatty"
