@@ -75,7 +75,7 @@ bun run build:all    # cross-compile darwin/linux × arm64/x64 + tarballs + sha2
 git tag v2.1.0 && git push origin v2.1.0
 ```
 
-One-time setup: the `homebrew-tap` repository must exist, and this repository needs a `HOMEBREW_TAP_TOKEN` Actions secret: a fine-grained token with **Contents: read & write** on `HarshDodiya1/homebrew-tap`.
+The workflow pushes to the tap with the `HOMEBREW_TAP_DEPLOY_KEY` Actions secret: an SSH deploy key that can write only to `HarshDodiya1/homebrew-tap`.
 
 ## Layout
 

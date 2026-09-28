@@ -58,7 +58,7 @@ Don't add unit-test files. Verify changes by **running the app**: `bun run smoke
 - `.github/workflows/release.yml`: triggered by a `v*.*.*` tag.
   1. Build 4 targets. macOS builds run on macOS so they get an ad-hoc codesign; x64 uses Bun's baseline build.
   2. Publish a GitHub release.
-  3. Push `Formula/chatty.rb` to `HarshDodiya1/homebrew-tap`, which needs the `HOMEBREW_TAP_TOKEN` secret.
+  3. Push `Formula/chatty.rb` to `HarshDodiya1/homebrew-tap`, using the `HOMEBREW_TAP_DEPLOY_KEY` secret (an SSH deploy key scoped to the tap).
   4. Run `brew install` + `brew test`.
 
 ## Commits
